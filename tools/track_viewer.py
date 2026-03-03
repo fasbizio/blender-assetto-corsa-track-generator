@@ -421,8 +421,9 @@ class TrackGLWidget(QOpenGLWidget):
         h = max(self.height(), 1)
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
+        near = max(0.1, self.cam_dist * 0.01)
         far = max(self.cam_dist, self._scene_radius) * 20.0
-        gluPerspective(45.0, w / h, 0.5, far)
+        gluPerspective(45.0, w / h, near, far)
         glMatrixMode(GL_MODELVIEW)
 
     def paintGL(self):
@@ -595,33 +596,31 @@ class TrackGLWidget(QOpenGLWidget):
             self.cam_pitch = max(-89.0, min(89.0, self.cam_pitch))
 
         elif self._mouse_button == Qt.MiddleButton:
-            # Pan
-            speed = self.cam_dist * 0.002
+            # Pan along view plane
+            speed = max(self.cam_dist, self._scene_radius * 0.01) * 0.003
             yaw_r = math.radians(self.cam_yaw)
-            # Right vector
+            pitch_r = math.radians(self.cam_pitch)
+            # Screen-space right vector
             rx = -math.sin(yaw_r)
             rz = math.cos(yaw_r)
-            self.cam_target[0] += rx * dx * speed
-            self.cam_target[2] += rz * dx * speed
-            self.cam_target[1] += dy * speed
+            # Screen-space up vector (view plane, accounts for pitch)
+            ux = -math.sin(pitch_r) * math.cos(yaw_r)
+            uy = math.cos(pitch_r)
+            uz = -math.sin(pitch_r) * math.sin(yaw_r)
+            self.cam_target[0] += (rx * dx + ux * dy) * speed
+            self.cam_target[1] += uy * dy * speed
+            self.cam_target[2] += (rz * dx + uz * dy) * speed
 
         self._update_projection()
         self.update()
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
-        factor = 0.9 if delta > 0 else 1.1
-        # Shift cam_target toward cursor direction for zoom-to-cursor
-        mx = event.x() / max(self.width(), 1) * 2.0 - 1.0
-        my = 1.0 - event.y() / max(self.height(), 1) * 2.0
-        yaw_r = math.radians(self.cam_yaw)
-        rx, rz = -math.sin(yaw_r), math.cos(yaw_r)
-        shift = self.cam_dist * (1.0 - factor) * 0.5
-        self.cam_target[0] -= rx * mx * shift
-        self.cam_target[2] -= rz * mx * shift
-        self.cam_target[1] += my * shift
+        factor = 0.85 if delta > 0 else 1.0 / 0.85
         self.cam_dist *= factor
-        self.cam_dist = max(1.0, min(self.cam_dist, self._scene_radius * 20.0))
+        min_dist = max(0.5, self._scene_radius * 0.005)
+        max_dist = self._scene_radius * 50.0
+        self.cam_dist = max(min_dist, min(self.cam_dist, max_dist))
         self._update_projection()
         self.update()
 

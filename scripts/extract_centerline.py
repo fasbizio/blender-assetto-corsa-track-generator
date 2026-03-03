@@ -186,7 +186,7 @@ def main():
 
     target_len = TARGET_LENGTH
     if os.path.isfile(CONFIG_PATH):
-        with open(CONFIG_PATH) as f:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
             cfg = json.load(f)
         info = cfg.get("info", {})
         if "length" in info:
@@ -194,7 +194,7 @@ def main():
             print(f"Target length from config: {target_len} m")
 
     print(f"\nReading {SVG_PATH}...")
-    with open(SVG_PATH) as f:
+    with open(SVG_PATH, encoding="utf-8") as f:
         svg = f.read()
 
     pattern = r'<path d="([^"]+)"[^>]*fill="#080808"'
@@ -286,7 +286,7 @@ def main():
     }
 
     print(f"\nSaving {len(result)} control points to {OUTPUT_PATH} (v2 format)...")
-    with open(OUTPUT_PATH, 'w') as f:
+    with open(OUTPUT_PATH, 'w', encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     print("Done!")
 

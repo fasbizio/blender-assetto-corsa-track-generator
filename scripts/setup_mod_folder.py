@@ -29,13 +29,13 @@ DEFAULTS_PATH = os.path.join(GENERATOR_DIR, "defaults.json")
 # Load defaults from generator project
 _defaults = {}
 if os.path.isfile(DEFAULTS_PATH):
-    with open(DEFAULTS_PATH) as _df:
+    with open(DEFAULTS_PATH, encoding="utf-8") as _df:
         _defaults = json.load(_df)
 
 # Load track config
 _config = {}
 if os.path.isfile(CONFIG_PATH):
-    with open(CONFIG_PATH) as _f:
+    with open(CONFIG_PATH, encoding="utf-8") as _f:
         _config = json.load(_f)
 
 _slug = _config.get("slug", "track")
@@ -82,7 +82,7 @@ def _write_data_file(layout, filename, content):
         path = os.path.join(MOD_DIR, layout, "data", filename)
     else:
         path = os.path.join(MOD_DIR, "data", filename)
-    with open(path, 'w') as f:
+    with open(path, 'w', encoding="utf-8", newline="\r\n") as f:
         f.write(content)
     return path
 
@@ -312,13 +312,13 @@ def write_models_ini():
 
     # Default layout (CW in AC) → uses reverse KN5 (empties flipped = CW in AC)
     path_def = os.path.join(MOD_DIR, "models_default.ini")
-    with open(path_def, 'w') as f:
+    with open(path_def, 'w', encoding="utf-8", newline="\r\n") as f:
         f.write(f"[MODEL_0]\nFILE={_slug}_reverse.kn5\nPOSITION=0,0,0\nROTATION=0,0,0\n")
     print(f"  Written {path_def}")
 
     # Reverse layout (CCW in AC) → uses default KN5 (master empties = CCW in AC)
     path_rev = os.path.join(MOD_DIR, "models_reverse.ini")
-    with open(path_rev, 'w') as f:
+    with open(path_rev, 'w', encoding="utf-8", newline="\r\n") as f:
         f.write(f"[MODEL_0]\nFILE={_slug}.kn5\nPOSITION=0,0,0\nROTATION=0,0,0\n")
     print(f"  Written {path_rev}")
 
@@ -363,19 +363,19 @@ def write_ui_track_json():
     if _has_reverse:
         # Default layout
         path_def = os.path.join(MOD_DIR, "ui", "default", "ui_track.json")
-        with open(path_def, 'w') as f:
+        with open(path_def, 'w', encoding="utf-8") as f:
             json.dump(_make_ui_json(is_reverse=False), f, indent=2, ensure_ascii=False)
         print(f"  Written {path_def}")
 
         # Reverse layout
         path_rev = os.path.join(MOD_DIR, "ui", "reverse", "ui_track.json")
-        with open(path_rev, 'w') as f:
+        with open(path_rev, 'w', encoding="utf-8") as f:
             json.dump(_make_ui_json(is_reverse=True), f, indent=2, ensure_ascii=False)
         print(f"  Written {path_rev}")
     else:
         # Single layout
         path = os.path.join(MOD_DIR, "ui", "ui_track.json")
-        with open(path, 'w') as f:
+        with open(path, 'w', encoding="utf-8") as f:
             json.dump(_make_ui_json(is_reverse=False), f, indent=2, ensure_ascii=False)
         print(f"  Written {path}")
 

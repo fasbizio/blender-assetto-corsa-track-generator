@@ -74,7 +74,7 @@ def main():
         print(f"Error: track_config.json not found in {track_root}")
         sys.exit(1)
 
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         config = json.load(f)
 
     slug = config.get("slug", "track")
@@ -94,7 +94,10 @@ def main():
         for path in platform_utils.ac_search_paths():
             print(f"  - {path}")
         print()
-        print("Set manually: AC_DIR=/path/to/assettocorsa python install.py")
+        if platform_utils.IS_WINDOWS:
+            print(r'Set manually: set AC_DIR=C:\path\to\assettocorsa&& python install.py')
+        else:
+            print("Set manually: AC_DIR=/path/to/assettocorsa python install.py")
         sys.exit(1)
 
     tracks_dir = os.path.join(ac_dir, "content", "tracks")

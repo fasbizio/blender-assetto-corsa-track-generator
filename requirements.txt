@@ -3,3 +3,5 @@ Pillow
 PyQt5
 PyOpenGL
 geopy
+srtm.py
+scipy

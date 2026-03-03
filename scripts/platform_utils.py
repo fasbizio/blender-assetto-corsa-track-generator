@@ -94,9 +94,17 @@ def download_file(url, dest_path):
 
 
 def extract_zip(zip_path, dest_dir):
-    """Extract a zip archive to dest_dir. Returns True on success."""
+    """Extract a zip archive to dest_dir. Returns True on success.
+
+    Validates member paths to prevent Zip Slip (directory traversal) attacks.
+    """
     try:
+        dest_dir = os.path.realpath(dest_dir)
         with zipfile.ZipFile(zip_path, "r") as zf:
+            for member in zf.namelist():
+                target = os.path.realpath(os.path.join(dest_dir, member))
+                if not target.startswith(dest_dir + os.sep) and target != dest_dir:
+                    return False
             zf.extractall(dest_dir)
         return True
     except Exception:

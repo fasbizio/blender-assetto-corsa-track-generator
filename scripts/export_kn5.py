@@ -34,7 +34,7 @@ except ImportError:
 
 # Load track configuration
 try:
-    with open(CONFIG_PATH, 'r') as f:
+    with open(CONFIG_PATH, 'r', encoding="utf-8") as f:
         _config = json.load(f)
     SLUG = _config.get("slug", "track")
 except (FileNotFoundError, json.JSONDecodeError) as e:

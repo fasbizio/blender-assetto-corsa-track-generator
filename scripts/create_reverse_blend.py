@@ -21,7 +21,7 @@ CONFIG_PATH = os.path.join(ROOT_DIR, "track_config.json")
 
 _config = {}
 if os.path.isfile(CONFIG_PATH):
-    with open(CONFIG_PATH) as _f:
+    with open(CONFIG_PATH, encoding="utf-8") as _f:
         _config = json.load(_f)
 _slug = _config.get("slug", "track")
 

@@ -39,13 +39,13 @@ except ImportError:
 # Load defaults from generator project
 _defaults = {}
 if os.path.isfile(DEFAULTS_PATH):
-    with open(DEFAULTS_PATH) as _df:
+    with open(DEFAULTS_PATH, encoding="utf-8") as _df:
         _defaults = json.load(_df)
 
 # Load track config
 _config = {}
 if os.path.isfile(CONFIG_PATH):
-    with open(CONFIG_PATH) as _f:
+    with open(CONFIG_PATH, encoding="utf-8") as _f:
         _config = json.load(_f)
 
 _slug = _config.get("slug", "track")
@@ -70,7 +70,10 @@ DEFAULT_SPEED = _ai.get("default_speed", _def_ai.get("default_speed", 80.0))
 MIN_CORNER_SPEED = _ai.get("min_corner_speed", _def_ai.get("min_corner_speed", 35.0))
 AI_SPACING = _ai.get("spacing", _def_ai.get("spacing", 2.0))
 
-from spline_utils import interpolate_centerline, resample_at_distance
+from spline_utils import (
+    interpolate_centerline, resample_at_distance,
+    interpolate_layer_elevation, resample_elevation,
+)
 
 print(f"Config: slug={_slug}, has_reverse={_has_reverse}, _REVERSE={_REVERSE}")
 print(f"Output: {OUTPUT_PATH}")
@@ -83,7 +86,7 @@ def extract_centerline_from_json():
     if not os.path.isfile(CENTERLINE_PATH):
         return None
 
-    with open(CENTERLINE_PATH) as f:
+    with open(CENTERLINE_PATH, encoding="utf-8") as f:
         data = json.load(f)
 
     # v2 format: extract road layer
@@ -92,18 +95,30 @@ def extract_centerline_from_json():
         print("  Warning: no road layer found in centerline.json")
         return None
     control_points = [tuple(p) for p in road_layer["points"]]
+    ctrl_elev = road_layer.get("elevation", [0.0] * len(control_points))
     print(f"  Loaded {len(control_points)} control points from centerline.json")
 
-    # Interpolate with Catmull-Rom
-    cl = interpolate_centerline(control_points, pts_per_seg=20)
-    print(f"  Interpolated to {len(cl)} points")
+    # Interpolate with Catmull-Rom (2D) + parallel elevation
+    cl_interp = interpolate_centerline(control_points, pts_per_seg=20)
+    interp_elev = interpolate_layer_elevation(
+        control_points, ctrl_elev, len(cl_interp), 20, True)
+    print(f"  Interpolated to {len(cl_interp)} points")
 
     # Resample at uniform spacing
-    cl = resample_at_distance(cl, spacing=AI_SPACING)
+    cl = resample_at_distance(cl_interp, spacing=AI_SPACING)
+    dense_elev = resample_elevation(interp_elev, cl_interp, cl)
     print(f"  Resampled to {len(cl)} points (every {AI_SPACING}m)")
 
-    # Convert to numpy 3D (z=0 for flat track)
-    centerline = np.array([(x, y, 0.0) for x, y in cl])
+    # Read elevation scale from track config
+    _def_elev = _defaults.get("elevation", {})
+    _elev_cfg = _config.get("elevation", {})
+    elev_scale = _elev_cfg.get("scale", _def_elev.get("scale", 1.0))
+
+    # Convert to numpy 3D with elevation
+    centerline = np.array([(x, y, z * elev_scale)
+                           for (x, y), z in zip(cl, dense_elev)])
+    elev_range = centerline[:, 2].max() - centerline[:, 2].min()
+    print(f"  Elevation: scale={elev_scale}, range={elev_range:.1f}m")
     return centerline
 
 

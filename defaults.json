@@ -20,6 +20,17 @@
     "kerb_friction": 0.93,
     "grass_friction": 0.60
   },
+  "elevation": {
+    "scale": 1.0
+  },
+  "banking": {
+    "enabled": true,
+    "design_speed": 60.0,
+    "friction": 0.7,
+    "scale": 1.0,
+    "max_angle": 15.0,
+    "smoothing_window": 10
+  },
   "camera": {
     "yaw": 86.7,
     "pitch": 42.9,

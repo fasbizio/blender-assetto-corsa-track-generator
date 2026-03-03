@@ -90,6 +90,67 @@ def resample_at_distance(cl, spacing=2.0):
     return out
 
 
+def interpolate_layer_elevation(ctrl_points, ctrl_elev, spline_len, pts_per_seg, closed):
+    """Map elevation from control points to interpolated spline points.
+
+    Uses the segment structure of Catmull-Rom interpolation:
+    spline point j belongs to segment (j // pts_per_seg).
+    Handles the deduplication that interpolate_centerline() applies
+    to closed curves (removes last point if < 1.0m from first).
+    """
+    n = len(ctrl_points)
+    elev = list(ctrl_elev) if ctrl_elev else [0.0] * n
+
+    # Match interpolate_centerline deduplication
+    if closed and n > 1:
+        dx = ctrl_points[-1][0] - ctrl_points[0][0]
+        dy = ctrl_points[-1][1] - ctrl_points[0][1]
+        if math.hypot(dx, dy) < 1.0:
+            n -= 1
+            elev = elev[:n]
+
+    if not elev or all(z == 0 for z in elev):
+        return [0.0] * spline_len
+
+    out = []
+    for j in range(spline_len):
+        seg = j // pts_per_seg
+        t = (j % pts_per_seg) / pts_per_seg
+        z0 = elev[seg % n]
+        if closed:
+            z1 = elev[(seg + 1) % n]
+        else:
+            z1 = elev[min(seg + 1, n - 1)]
+        out.append(z0 + t * (z1 - z0))
+    return out
+
+
+def resample_elevation(interp_elev, interp_pts, resampled_pts):
+    """Map elevation from interpolated to resampled curve using ordered scan.
+
+    Both curves follow the same path, so we scan forward through
+    interp_pts for each resampled point.
+    """
+    out = []
+    search_start = 0
+    n_interp = len(interp_pts)
+    for px, py in resampled_pts:
+        best_d = float('inf')
+        best_z = 0.0
+        for offset in range(n_interp):
+            i = (search_start + offset) % n_interp
+            cx, cy = interp_pts[i]
+            d = (px - cx) ** 2 + (py - cy) ** 2
+            if d < best_d:
+                best_d = d
+                best_z = interp_elev[i]
+                search_start = i
+            elif offset > 50:
+                break
+        out.append(best_z)
+    return out
+
+
 def load_centerline_v2(filepath):
     """Load centerline.json in v2 format.
 
@@ -97,7 +158,7 @@ def load_centerline_v2(filepath):
     """
     if not os.path.isfile(filepath):
         return {"version": 2, "layers": [], "start": None, "map_center": None}
-    with open(filepath) as f:
+    with open(filepath, encoding="utf-8") as f:
         data = json.load(f)
     data.setdefault("start", None)
     data.setdefault("map_center", None)
@@ -112,6 +173,7 @@ def save_centerline_v2(filepath, data):
         "layers": data.get("layers", []),
         "start": data.get("start"),
         "map_center": data.get("map_center"),
+        "map_search": data.get("map_search"),
     }
-    with open(filepath, "w") as f:
+    with open(filepath, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2)

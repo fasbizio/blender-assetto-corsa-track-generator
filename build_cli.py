@@ -5,7 +5,8 @@ Reads slug and layout config from TRACK_ROOT/track_config.json.
 Runs a 6-step pipeline (default + reverse) or 3-step (single layout).
 
 Usage:
-    TRACK_ROOT=/path/to/track python build_cli.py [--install]
+    Linux:   TRACK_ROOT=/path/to/track python build_cli.py [--install] [--force-init]
+    Windows: set TRACK_ROOT=C:\\path\\to\\track&& python build_cli.py [--install] [--force-init]
 """
 
 import os
@@ -17,9 +18,10 @@ import json
 GENERATOR_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.environ.get("TRACK_ROOT", os.getcwd())
 
-# Ensure scripts/ is on the path for platform_utils
+# Ensure scripts/ is on the path for platform_utils and blend_meta
 sys.path.insert(0, os.path.join(GENERATOR_DIR, "scripts"))
 import platform_utils
+from blend_meta import is_blend_modified, backup_blend
 
 
 def load_config():
@@ -28,7 +30,7 @@ def load_config():
     if not os.path.isfile(config_path):
         print(f"Error: track_config.json not found in {ROOT_DIR}")
         sys.exit(1)
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         config = json.load(f)
     slug = config.get("slug", "track")
     has_reverse = config.get("layouts", {}).get("reverse", False)
@@ -51,6 +53,33 @@ def main():
         if cl_mtime > blend_mtime:
             needs_init = True
             print(f"  centerline.json is newer than {slug}.blend — regenerating")
+
+    # Blend protection: detect manual modifications before overwriting
+    if needs_init and os.path.isfile(blend_file):
+        modified = is_blend_modified(blend_file)
+        if modified:
+            if "--force-init" in sys.argv:
+                bak = backup_blend(blend_file)
+                print(f"  Backup: {os.path.basename(bak)}")
+            else:
+                print()
+                print(f"  WARNING: {slug}.blend has been modified manually.")
+                print(f"  Regenerating will overwrite your changes.")
+                print()
+                print(f"  [r] Regenerate (backup + overwrite)")
+                print(f"  [s] Skip init (build from current .blend)")
+                print(f"  [a] Abort")
+                print()
+                choice = input("  Choice [r/s/a]: ").strip().lower()
+                if choice == "r":
+                    bak = backup_blend(blend_file)
+                    print(f"  Backup: {os.path.basename(bak)}")
+                elif choice == "s":
+                    needs_init = False
+                    print("  Skipping init — building from current .blend")
+                else:
+                    print("  Aborted.")
+                    sys.exit(0)
 
     # Compute venv path from ROOT_DIR (not GENERATOR_DIR)
     if platform_utils.IS_WINDOWS:
@@ -196,7 +225,10 @@ def main():
         else:
             print(f"Warning: install.py not found at {install_py}")
     else:
-        print(f"To install: TRACK_ROOT={ROOT_DIR} python install.py")
+        if platform_utils.IS_WINDOWS:
+            print(f'To install: set TRACK_ROOT={ROOT_DIR}&& python install.py')
+        else:
+            print(f"To install: TRACK_ROOT={ROOT_DIR} python install.py")
 
     print(f"To share:   send builds/{slug}.zip")
 

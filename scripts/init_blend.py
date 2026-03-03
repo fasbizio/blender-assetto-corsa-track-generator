@@ -13,7 +13,7 @@ Creates {slug}.blend with GeoNodes-based track geometry:
   - Startline: Simple mesh
   - Empties:   AC_START, AC_PIT, AC_TIME
 
-The export pipeline (build.sh / build_cli.py) operates on the .blend directly,
+The export pipeline (build_cli.py) operates on the .blend directly,
 using depsgraph evaluation to resolve GeoNodes into final meshes.
 """
 
@@ -32,12 +32,12 @@ TEXTURES_DIR = os.path.join(ROOT_DIR, "textures")
 # Load defaults from generator project, then override with track config
 _defaults = {}
 if os.path.isfile(DEFAULTS_PATH):
-    with open(DEFAULTS_PATH) as _df:
+    with open(DEFAULTS_PATH, encoding="utf-8") as _df:
         _defaults = json.load(_df)
 
 _init_config = {}
 if os.path.isfile(CONFIG_PATH):
-    with open(CONFIG_PATH) as _cf:
+    with open(CONFIG_PATH, encoding="utf-8") as _cf:
         _init_config = json.load(_cf)
 _slug = _init_config.get("slug", "track")
 
@@ -58,7 +58,7 @@ except ImportError:
 # Merge defaults + track config (track config wins)
 _config = {}
 if os.path.isfile(CONFIG_PATH):
-    with open(CONFIG_PATH) as f:
+    with open(CONFIG_PATH, encoding="utf-8") as f:
         _config = json.load(f)
 
 _def_geo = _defaults.get("geometry", {})
@@ -72,6 +72,21 @@ WALL_HEIGHT = _geo.get("wall_height", _def_geo.get("wall_height", 1.5))
 WALL_THICKNESS = _geo.get("wall_thickness", _def_geo.get("wall_thickness", 1.0))
 GROUND_MARGIN = _geo.get("ground_margin", _def_geo.get("ground_margin", 10.0))
 
+# Elevation config
+_def_elev = _defaults.get("elevation", {})
+_elev_cfg = _config.get("elevation", {})
+ELEV_SCALE = _elev_cfg.get("scale", _def_elev.get("scale", 1.0))
+
+# Banking config
+_def_bank = _defaults.get("banking", {})
+_bank_cfg = _config.get("banking", {})
+BANK_ENABLED = _bank_cfg.get("enabled", _def_bank.get("enabled", True))
+BANK_SPEED = _bank_cfg.get("design_speed", _def_bank.get("design_speed", 60.0)) / 3.6
+BANK_FRICTION = _bank_cfg.get("friction", _def_bank.get("friction", 0.7))
+BANK_SCALE = _bank_cfg.get("scale", _def_bank.get("scale", 1.0))
+BANK_MAX = math.radians(_bank_cfg.get("max_angle", _def_bank.get("max_angle", 15.0)))
+BANK_SMOOTH = _bank_cfg.get("smoothing_window", _def_bank.get("smoothing_window", 10))
+
 # ============================================================
 # TRACK CENTERLINE
 # ============================================================
@@ -82,6 +97,7 @@ sys.path.insert(0, SCRIPT_DIR)
 from spline_utils import (
     interpolate_centerline, interpolate_open,
     load_centerline_v2, resample_at_distance,
+    interpolate_layer_elevation, resample_elevation,
 )
 
 _cl_data = load_centerline_v2(_CENTERLINE_PATH)
@@ -116,6 +132,161 @@ def cum_distances(cl):
         d.append(d[-1] + (dx**2 + dy**2)**0.5)
     return d
 
+
+def compute_curvature(cl):
+    """Signed curvature (1/radius) at each station via circumscribed circle.
+
+    Positive = turning left, negative = turning right.
+    """
+    n = len(cl)
+    curvature = []
+    for i in range(n):
+        p0 = cl[(i - 1) % n]
+        p1 = cl[i]
+        p2 = cl[(i + 1) % n]
+        ax, ay = p1[0] - p0[0], p1[1] - p0[1]
+        bx, by = p2[0] - p0[0], p2[1] - p0[1]
+        cross = ax * by - ay * bx
+        a = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        b = math.hypot(p2[0] - p0[0], p2[1] - p0[1])
+        c = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+        denom = a * b * c
+        if denom < 1e-9:
+            curvature.append(0.0)
+        else:
+            curvature.append(2.0 * cross / denom)
+    return curvature
+
+
+def compute_banking(curvature, speed_ms, friction, scale, max_angle_rad):
+    """Banking angle per station from superelevation formula."""
+    g = 9.81
+    banking = []
+    for k in curvature:
+        r = 1.0 / max(abs(k), 1e-6)
+        num = max(0.0, speed_ms ** 2 - r * g * friction)
+        den = r * g + speed_ms ** 2 * friction
+        theta = math.atan(num / den) if den > 1e-9 else 0.0
+        theta = min(theta, max_angle_rad) * scale
+        if k < 0:
+            theta = -theta
+        banking.append(theta)
+    return banking
+
+
+def smooth_banking(banking, window):
+    """Moving-average smoothing with wraparound for closed loop."""
+    n = len(banking)
+    if window < 2 or n < 3:
+        return list(banking)
+    hw = window // 2
+    out = []
+    for i in range(n):
+        total = 0.0
+        for j in range(-hw, hw + 1):
+            total += banking[(i + j) % n]
+        out.append(total / (2 * hw + 1))
+    return out
+
+
+def _ground_z(x, y, cl_3d, blend_inner=0.0, blend_outer=0.0, base_z=-0.05):
+    """Nearest-neighbor Z from road centerline with edge blending.
+
+    Within blend_inner: follow road Z.
+    Between blend_inner and blend_outer: linearly blend toward base_z.
+    Beyond blend_outer: base_z.
+    """
+    best_d2 = float('inf')
+    z = 0.0
+    for cx, cy, cz in cl_3d:
+        d2 = (x - cx) ** 2 + (y - cy) ** 2
+        if d2 < best_d2:
+            best_d2 = d2
+            z = cz
+    road_z = z - 0.05
+    if blend_outer <= blend_inner or blend_inner <= 0:
+        return road_z
+    dist = math.sqrt(best_d2)
+    if dist <= blend_inner:
+        return road_z
+    if dist >= blend_outer:
+        return base_z
+    t = (dist - blend_inner) / (blend_outer - blend_inner)
+    return road_z * (1.0 - t) + base_z * t
+
+
+def _build_ground_grid(cl, hw, cl_3d):
+    """Pre-compute ground elevation grid matching build_ground() mesh.
+
+    Returns a dict with grid origin, tile size, dimensions, and Z values.
+    Used by build_walls_from_layers() to bilinearly interpolate wall base Z,
+    guaranteeing it matches the rendered ground surface exactly.
+    """
+    xs = [c[0] for c in cl]
+    ys = [c[1] for c in cl]
+    mg = hw + GRASS_WIDTH + WALL_THICKNESS + GROUND_MARGIN
+    x0 = min(xs) - mg
+    y0 = min(ys) - mg
+    x1 = max(xs) + mg
+    y1 = max(ys) + mg
+    tile = 10.0
+    nx = max(1, int(math.ceil((x1 - x0) / tile)))
+    ny = max(1, int(math.ceil((y1 - y0) / tile)))
+    blend_inner = hw + GRASS_WIDTH + WALL_THICKNESS
+    blend_outer = blend_inner + GROUND_MARGIN
+    base_z = min(z for _, _, z in cl_3d) - 0.05 if cl_3d else -0.05
+    grid = []
+    for iy in range(ny + 1):
+        row = []
+        for ix in range(nx + 1):
+            gx = x0 + ix * tile
+            gy = y0 + iy * tile
+            row.append(_ground_z(gx, gy, cl_3d, blend_inner, blend_outer, base_z))
+        grid.append(row)
+    return {"x0": x0, "y0": y0, "tile": tile, "nx": nx, "ny": ny, "grid": grid}
+
+
+def _ground_grid_z_at(gg, x, y):
+    """Bilinear Z interpolation from ground grid — matches rendered ground."""
+    fx = (x - gg["x0"]) / gg["tile"]
+    fy = (y - gg["y0"]) / gg["tile"]
+    ix = max(0, min(int(fx), gg["nx"] - 1))
+    iy = max(0, min(int(fy), gg["ny"] - 1))
+    tx = max(0.0, min(fx - ix, 1.0))
+    ty = max(0.0, min(fy - iy, 1.0))
+    z00 = gg["grid"][iy][ix]
+    z10 = gg["grid"][iy][ix + 1]
+    z01 = gg["grid"][iy + 1][ix]
+    z11 = gg["grid"][iy + 1][ix + 1]
+    return (z00 * (1 - tx) + z10 * tx) * (1 - ty) + (z01 * (1 - tx) + z11 * tx) * ty
+
+
+def _build_road_tilt_lookup(dense_ctrl, dense_banking):
+    """Return a function: (x, y) -> (tilt, signed_distance).
+
+    signed_distance > 0 = left of road direction, < 0 = right.
+    """
+    n = len(dense_ctrl)
+
+    def lookup(x, y):
+        best_d2 = float('inf')
+        best_idx = 0
+        for i, (cx, cy) in enumerate(dense_ctrl):
+            d2 = (x - cx) ** 2 + (y - cy) ** 2
+            if d2 < best_d2:
+                best_d2 = d2
+                best_idx = i
+        cx, cy = dense_ctrl[best_idx]
+        i_next = (best_idx + 1) % n
+        i_prev = (best_idx - 1) % n
+        tx = dense_ctrl[i_next][0] - dense_ctrl[i_prev][0]
+        ty = dense_ctrl[i_next][1] - dense_ctrl[i_prev][1]
+        dx, dy = x - cx, y - cy
+        cross = tx * dy - ty * dx
+        signed_d = math.copysign(math.sqrt(best_d2), cross)
+        return dense_banking[best_idx], signed_d
+
+    return lookup
 
 
 # ============================================================
@@ -257,14 +428,11 @@ def _add_uv_projection(nodes, links, geom_socket, tile=5.0, use_z_for_v=False):
 # Edge polyline helpers
 # ============================================================
 
-def create_edge_polyline(name, coords, cyclic=True):
-    """Create an edge-only polyline mesh from coordinates.
-
-    This is the same technique used for the road (1ROAD): each object's
-    base mesh IS the editable path.  GeoNodes convert it to final geometry
-    via Mesh to Curve → Curve to Mesh.
+def create_edge_polyline(name, coords, tilts=None, cyclic=True):
+    """Create an edge-only polyline mesh with optional per-point tilt attribute.
 
     coords: list of (x,y) or (x,y,z) tuples.
+    tilts: optional list of tilt angles in radians (banking).
     cyclic: close the loop (last vertex → first vertex).
     """
     me = bpy.data.meshes.new(name + "_polyline")
@@ -272,12 +440,15 @@ def create_edge_polyline(name, coords, cyclic=True):
     bpy.context.collection.objects.link(ob)
 
     bm = bmesh.new()
+    tilt_layer = bm.verts.layers.float.new("tilt") if tilts else None
     verts = []
-    for pt in coords:
+    for i, pt in enumerate(coords):
         if len(pt) == 2:
             verts.append(bm.verts.new((pt[0], pt[1], 0.0)))
         else:
             verts.append(bm.verts.new(pt))
+        if tilt_layer:
+            verts[-1][tilt_layer] = tilts[i]
     bm.verts.ensure_lookup_table()
 
     n = len(verts)
@@ -404,7 +575,36 @@ def create_setmaterial_nodegroup(name="SetMaterialNG"):
     return ng
 
 
-def build_road_with_roadgen(ctrl_pts, mat):
+def _inject_tilt_into_nodegroup(ng):
+    """Insert Set Curve Tilt into an existing GeoNodes group.
+
+    Finds the Mesh-to-Curve -> Curve-to-Mesh link and inserts
+    Named Attribute + Set Curve Tilt between them.
+    """
+    nodes = ng.nodes
+    links = ng.links
+    m2c = next((n for n in nodes if n.type == 'MESH_TO_CURVE'), None)
+    if not m2c:
+        print("  [WARN] No Mesh-to-Curve node found, skipping tilt injection")
+        return
+    m2c_link = next((l for l in links
+                     if l.from_node == m2c and l.from_socket.name == 'Curve'), None)
+    if not m2c_link:
+        print("  [WARN] No outgoing Curve link from Mesh-to-Curve, skipping tilt injection")
+        return
+    target_socket = m2c_link.to_socket
+    links.remove(m2c_link)
+    attr_node = nodes.new('GeometryNodeInputNamedAttribute')
+    attr_node.data_type = 'FLOAT'
+    attr_node.inputs['Name'].default_value = 'tilt'
+    set_tilt = nodes.new('GeometryNodeSetCurveTilt')
+    links.new(m2c.outputs['Curve'], set_tilt.inputs['Curve'])
+    links.new(attr_node.outputs['Attribute'], set_tilt.inputs['Tilt'])
+    links.new(set_tilt.outputs['Curve'], target_socket)
+    print("  [OK] Injected Set Curve Tilt into", ng.name)
+
+
+def build_road_with_roadgen(ctrl_pts, mat, tilts=None, dense_elev=None):
     """Build 1ROAD as a live RoadGen GeoNodes modifier on the polyline.
 
     The modifier is NOT applied — the road remains editable.
@@ -414,8 +614,12 @@ def build_road_with_roadgen(ctrl_pts, mat):
     """
     print("\nBuilding 1ROAD with RoadGen GeoNodes (live)...")
 
-    # Create polyline from control points (edge-only mesh, editable)
-    road_obj = create_edge_polyline("1ROAD", ctrl_pts, cyclic=True)
+    # Create 3D polyline from control points with elevation
+    if dense_elev:
+        pts_3d = [(x, y, dense_elev[i]) for i, (x, y) in enumerate(ctrl_pts)]
+    else:
+        pts_3d = ctrl_pts
+    road_obj = create_edge_polyline("1ROAD", pts_3d, tilts=tilts, cyclic=True)
     print(f"  [OK] Polyline created: {len(ctrl_pts)} control points")
 
     # Append RoadGen node group
@@ -423,6 +627,10 @@ def build_road_with_roadgen(ctrl_pts, mat):
     if ng is None:
         print("  [FALLBACK] RoadGen not available, road will be plain polyline")
         return road_obj
+
+    # Inject tilt handling into RoadGen
+    if tilts:
+        _inject_tilt_into_nodegroup(ng)
 
     # Add GeoNodes modifier (keep LIVE)
     mod = road_obj.modifiers.new(name="RoadGen", type='NODES')
@@ -554,10 +762,21 @@ def create_curbgen_nodegroup():
     profile_info.transform_space = 'RELATIVE'
     links.new(gi.outputs['Profile'], profile_info.inputs['Object'])
 
+    # Read tilt attribute and apply to curve
+    attr_node = nodes.new('GeometryNodeInputNamedAttribute')
+    attr_node.data_type = 'FLOAT'
+    attr_node.inputs['Name'].default_value = 'tilt'
+    attr_node.location = (-200, -100)
+
+    set_tilt = nodes.new('GeometryNodeSetCurveTilt')
+    set_tilt.location = (-200, 0)
+    links.new(m2c.outputs['Curve'], set_tilt.inputs['Curve'])
+    links.new(attr_node.outputs['Attribute'], set_tilt.inputs['Tilt'])
+
     # Curve to Mesh: sweep CurbProfile along curb path
     c2m = nodes.new('GeometryNodeCurveToMesh')
     c2m.location = (0, 0)
-    links.new(m2c.outputs['Curve'], c2m.inputs['Curve'])
+    links.new(set_tilt.outputs['Curve'], c2m.inputs['Curve'])
     links.new(profile_info.outputs['Geometry'], c2m.inputs['Profile Curve'])
 
     # Set Material
@@ -573,12 +792,13 @@ def create_curbgen_nodegroup():
     ng['_id_profile'] = s_profile.identifier
     ng['_id_mat'] = s_mat.identifier
 
-    print("  [OK] Created CurbGen GeoNodes group")
+    print("  [OK] Created CurbGen GeoNodes group (with tilt support)")
     return ng
 
 
-def build_curbs_from_layers(curb_layers, curbgen_ng, mat, profile_obj):
-    """Build curb objects from v2 layout layers."""
+def build_curbs_from_layers(curb_layers, curbgen_ng, mat, profile_obj,
+                            road_tilt_at=None, elev_scale=1.0):
+    """Build curb objects from v2 layout layers with elevation + banking."""
     id_profile = curbgen_ng['_id_profile']
     id_mat = curbgen_ng['_id_mat']
     objs = []
@@ -586,15 +806,21 @@ def build_curbs_from_layers(curb_layers, curbgen_ng, mat, profile_obj):
         pts = layer_data["points"] if isinstance(layer_data, dict) else layer_data.points
         name = layer_data["name"] if isinstance(layer_data, dict) else layer_data.name
         closed = layer_data.get("closed", False) if isinstance(layer_data, dict) else getattr(layer_data, 'closed', False)
+        ctrl_elev = layer_data.get("elevation", []) if isinstance(layer_data, dict) else getattr(layer_data, 'elevation', [])
         if len(pts) < 2:
             continue
         spline = interpolate_centerline(pts, pts_per_seg=20) if closed else interpolate_open(pts, pts_per_seg=20)
-        coords_3d = [(p[0], p[1], 0.0) for p in spline]
+        ctrl_pts = [tuple(p) for p in pts]
+        interp_elev = interpolate_layer_elevation(ctrl_pts, ctrl_elev, len(spline), 20, closed)
+        coords_3d = [(p[0], p[1], interp_elev[i] * elev_scale) for i, p in enumerate(spline)]
+        tilts = None
+        if road_tilt_at:
+            tilts = [road_tilt_at(p[0], p[1])[0] for p in spline]
         # Ensure naming convention
         obj_name = name.upper()
         if not obj_name.startswith(("1KERB_", "2KERB_")):
             obj_name = f"1KERB_{obj_name}"
-        ob = create_edge_polyline(obj_name, coords_3d, cyclic=closed)
+        ob = create_edge_polyline(obj_name, coords_3d, tilts=tilts, cyclic=closed)
         mod = ob.modifiers.new("CurbGen", 'NODES')
         mod.node_group = curbgen_ng
         mod[id_profile] = profile_obj
@@ -605,12 +831,14 @@ def build_curbs_from_layers(curb_layers, curbgen_ng, mat, profile_obj):
     return objs
 
 
-def build_walls_from_layers(wall_layers, mat):
+def build_walls_from_layers(wall_layers, mat, ground_grid=None):
     """Build wall objects from v2 layout layers using bmesh for AC collision.
 
     Each wall segment has 3 faces per section (outer, inner, top) with
     explicit vertex ordering for correct normals. This matches the proven
     approach that works with AC's collision engine.
+    Wall base Z is bilinearly interpolated from the ground grid, matching
+    the rendered ground surface exactly.
     """
     import bmesh
     seg_len = 25.0
@@ -664,10 +892,11 @@ def build_walls_from_layers(wall_layers, mat):
                 nx, ny = norms[idx]
                 bix, biy = cx + nx * half_t, cy + ny * half_t
                 box_, boy = cx - nx * half_t, cy - ny * half_t
-                bi.append(bm.verts.new((bix, biy, 0)))
-                bo.append(bm.verts.new((box_, boy, 0)))
-                ti.append(bm.verts.new((bix, biy, WALL_HEIGHT)))
-                to_.append(bm.verts.new((box_, boy, WALL_HEIGHT)))
+                wall_z = _ground_grid_z_at(ground_grid, cx, cy) if ground_grid else 0.0
+                bi.append(bm.verts.new((bix, biy, wall_z)))
+                bo.append(bm.verts.new((box_, boy, wall_z)))
+                ti.append(bm.verts.new((bix, biy, wall_z + WALL_HEIGHT)))
+                to_.append(bm.verts.new((box_, boy, wall_z + WALL_HEIGHT)))
 
             bm.verts.ensure_lookup_table()
             for i in range(e - s - 1):
@@ -747,10 +976,21 @@ def create_grassgen_nodegroup():
     links.new(combine_a.outputs['Vector'], profile_line.inputs['Start'])
     links.new(combine_b.outputs['Vector'], profile_line.inputs['End'])
 
+    # Read tilt attribute and apply to curve
+    grass_attr = nodes.new('GeometryNodeInputNamedAttribute')
+    grass_attr.data_type = 'FLOAT'
+    grass_attr.inputs['Name'].default_value = 'tilt'
+    grass_attr.location = (-200, -100)
+
+    grass_set_tilt = nodes.new('GeometryNodeSetCurveTilt')
+    grass_set_tilt.location = (-100, 0)
+    links.new(m2c.outputs['Curve'], grass_set_tilt.inputs['Curve'])
+    links.new(grass_attr.outputs['Attribute'], grass_set_tilt.inputs['Tilt'])
+
     # Curve to Mesh
     c2m = nodes.new('GeometryNodeCurveToMesh')
     c2m.location = (0, 0)
-    links.new(m2c.outputs['Curve'], c2m.inputs['Curve'])
+    links.new(grass_set_tilt.outputs['Curve'], c2m.inputs['Curve'])
     links.new(profile_line.outputs['Curve'], c2m.inputs['Profile Curve'])
 
     # Set Material
@@ -766,28 +1006,32 @@ def create_grassgen_nodegroup():
     ng['_id_width'] = s_width.identifier
     ng['_id_mat'] = s_mat.identifier
 
-    print("  [OK] Created GrassGen GeoNodes group")
+    print("  [OK] Created GrassGen GeoNodes group (with tilt support)")
     return ng
 
 
-def build_grass_geonodes(cl, norms, hw, grassgen_ng, mat):
-    """Create 1GRASS and 2GRASS as edge polylines with GrassGen modifiers.
-
-    Each grass object's base mesh IS its editable path.
-    Select → Edit Mode → edit control points directly.
-    """
+def build_grass_geonodes(cl, norms, hw, grassgen_ng, mat,
+                         dense_elev=None, dense_banking=None):
+    """Create 1GRASS and 2GRASS as edge polylines with GrassGen modifiers."""
     id_width = grassgen_ng['_id_width']
     id_mat = grassgen_ng['_id_mat']
 
     objs = []
     for name, offset_sign in [("1GRASS", 1), ("2GRASS", -1)]:
         offset = offset_sign * (hw + GRASS_WIDTH / 2)
-        # Compute path coordinates directly
-        coords = [(cl[i][0] + norms[i][0] * offset,
-                    cl[i][1] + norms[i][1] * offset,
-                    -0.01) for i in range(len(cl))]
+        coords = []
+        for i in range(len(cl)):
+            x = cl[i][0] + norms[i][0] * offset
+            y = cl[i][1] + norms[i][1] * offset
+            z = -0.01
+            if dense_elev:
+                z = dense_elev[i] - 0.01
+                if dense_banking:
+                    z += math.sin(dense_banking[i]) * offset
+            coords.append((x, y, z))
 
-        ob = create_edge_polyline(name, coords, cyclic=True)
+        tilts = dense_banking if dense_banking else None
+        ob = create_edge_polyline(name, coords, tilts=tilts, cyclic=True)
 
         mod = ob.modifiers.new("GrassGen", 'NODES')
         mod.node_group = grassgen_ng
@@ -805,7 +1049,7 @@ def build_grass_geonodes(cl, norms, hw, grassgen_ng, mat):
 # Ground (single plane)
 # ============================================================
 
-def build_ground(cl, hw, mat):
+def build_ground(cl, hw, mat, cl_3d=None):
     """Single ground plane covering the track area."""
     xs = [c[0] for c in cl]
     ys = [c[1] for c in cl]
@@ -829,12 +1073,20 @@ def build_ground(cl, hw, mat):
     bm = bmesh.new()
     uvl = bm.loops.layers.uv.new("UVMap")
 
+    # Distance-based blending: road area follows elevation, edges taper to base
+    blend_inner = hw + GRASS_WIDTH + WALL_THICKNESS
+    blend_outer = blend_inner + GROUND_MARGIN
+    base_z = min(z for _, _, z in cl_3d) - 0.05 if cl_3d else -0.05
+
     # Create grid of tile-sized quads
     verts_grid = []
     for iy in range(ny_tiles + 1):
         row = []
         for ix in range(nx_tiles + 1):
-            v = bm.verts.new((x0 + ix * tile, y0 + iy * tile, -0.05))
+            gx = x0 + ix * tile
+            gy = y0 + iy * tile
+            gz = _ground_z(gx, gy, cl_3d, blend_inner, blend_outer, base_z) if cl_3d else -0.05
+            v = bm.verts.new((gx, gy, gz))
             row.append(v)
         verts_grid.append(row)
 
@@ -864,7 +1116,7 @@ def build_ground(cl, hw, mat):
 # Startline
 # ============================================================
 
-def build_startline(cl, norms, start_idx, mat):
+def build_startline(cl, norms, start_idx, mat, z_road=0.0, tilt=0.0):
     """Build startline mesh across the road at the given centerline index."""
     n = len(cl)
     idx = start_idx % n
@@ -879,16 +1131,18 @@ def build_startline(cl, norms, start_idx, mat):
     line_len = 2.0
     hw_r = ROAD_WIDTH / 2
     hl = line_len / 2
+    z_left = z_road + math.sin(tilt) * (-hw_r) + 0.005
+    z_right = z_road + math.sin(tilt) * hw_r + 0.005
     nm = "1STARTLINE"
     me = bpy.data.meshes.new(nm)
     ob = bpy.data.objects.new(nm, me)
     bpy.context.collection.objects.link(ob)
     bm = bmesh.new()
     uvl = bm.loops.layers.uv.new("UVMap")
-    v0 = bm.verts.new((cx - nx * hw_r - tx * hl, cy - ny * hw_r - ty * hl, 0.005))
-    v1 = bm.verts.new((cx + nx * hw_r - tx * hl, cy + ny * hw_r - ty * hl, 0.005))
-    v2 = bm.verts.new((cx + nx * hw_r + tx * hl, cy + ny * hw_r + ty * hl, 0.005))
-    v3 = bm.verts.new((cx - nx * hw_r + tx * hl, cy - ny * hw_r + ty * hl, 0.005))
+    v0 = bm.verts.new((cx - nx * hw_r - tx * hl, cy - ny * hw_r - ty * hl, z_left))
+    v1 = bm.verts.new((cx + nx * hw_r - tx * hl, cy + ny * hw_r - ty * hl, z_right))
+    v2 = bm.verts.new((cx + nx * hw_r + tx * hl, cy + ny * hw_r + ty * hl, z_right))
+    v3 = bm.verts.new((cx - nx * hw_r + tx * hl, cy - ny * hw_r + ty * hl, z_left))
     f = bm.faces.new([v0, v1, v2, v3])
     f.loops[0][uvl].uv = (0, 0)
     f.loops[1][uvl].uv = (1, 0)
@@ -905,7 +1159,8 @@ def build_startline(cl, norms, start_idx, mat):
     return ob
 
 
-def build_start_gantry(cl, norms, start_idx, mat_struct, mat_sponsor, mat_light):
+def build_start_gantry(cl, norms, start_idx, mat_struct, mat_sponsor, mat_light,
+                       z_road=0.0, tilt=0.0):
     """Build a start gantry (portal) over the startline with sponsor panel and lights."""
     n = len(cl)
     idx = start_idx % n
@@ -924,9 +1179,9 @@ def build_start_gantry(cl, norms, start_idx, mat_struct, mat_sponsor, mat_light)
     beam_s = 0.15               # beam cross-section
     panel_w = 3.0               # sponsor panel width
     panel_h = 1.2               # sponsor panel height
-    panel_z_bot = 3.2           # panel bottom z
+    panel_z_bot = 3.2           # panel bottom z (relative to road)
     light_r = 0.08              # light disc radius
-    light_z = 3.0               # lights z position
+    light_z = 3.0               # lights z position (relative to road)
     light_seg = 8               # segments per light disc
     n_lights = 5
     light_spread = 2.4          # total width of light row
@@ -963,29 +1218,35 @@ def build_start_gantry(cl, norms, start_idx, mat_struct, mat_sponsor, mat_light)
             f = bm.faces.new([corners[i] for i in fi])
             f.material_index = mat_idx
 
+    # Pillar base Z follows banking
+    z_base_left = z_road + math.sin(tilt) * (-hw)
+    z_base_right = z_road + math.sin(tilt) * hw
+    beam_top_z = max(z_base_left, z_base_right) + pillar_h - beam_s / 2
+
     # Left pillar
     lx = cx - nx_n * hw
     ly = cy - ny_n * hw
-    _box(lx, ly, pillar_h / 2, pillar_s, pillar_s, pillar_h, 0)
+    _box(lx, ly, z_base_left + pillar_h / 2, pillar_s, pillar_s, pillar_h, 0)
 
     # Right pillar
     rx = cx + nx_n * hw
     ry = cy + ny_n * hw
-    _box(rx, ry, pillar_h / 2, pillar_s, pillar_s, pillar_h, 0)
+    _box(rx, ry, z_base_right + pillar_h / 2, pillar_s, pillar_s, pillar_h, 0)
 
-    # Top beam connecting pillars
+    # Top beam connecting pillars (stays level)
     beam_cx = cx
     beam_cy = cy
     beam_len = hw * 2
-    _box(beam_cx, beam_cy, pillar_h - beam_s / 2, beam_len, beam_s, beam_s, 0)
+    _box(beam_cx, beam_cy, beam_top_z, beam_len, beam_s, beam_s, 0)
 
     # Sponsor panel (single quad facing the driving direction)
-    panel_z_top = panel_z_bot + panel_h
+    panel_z_bot_abs = z_road + panel_z_bot
+    panel_z_top_abs = panel_z_bot_abs + panel_h
     hp = panel_w / 2
-    p0 = bm.verts.new((cx - nx_n * hp - tx * 0.01, cy - ny_n * hp - ty * 0.01, panel_z_bot))
-    p1 = bm.verts.new((cx + nx_n * hp - tx * 0.01, cy + ny_n * hp - ty * 0.01, panel_z_bot))
-    p2 = bm.verts.new((cx + nx_n * hp - tx * 0.01, cy + ny_n * hp - ty * 0.01, panel_z_top))
-    p3 = bm.verts.new((cx - nx_n * hp - tx * 0.01, cy - ny_n * hp - ty * 0.01, panel_z_top))
+    p0 = bm.verts.new((cx - nx_n * hp - tx * 0.01, cy - ny_n * hp - ty * 0.01, panel_z_bot_abs))
+    p1 = bm.verts.new((cx + nx_n * hp - tx * 0.01, cy + ny_n * hp - ty * 0.01, panel_z_bot_abs))
+    p2 = bm.verts.new((cx + nx_n * hp - tx * 0.01, cy + ny_n * hp - ty * 0.01, panel_z_top_abs))
+    p3 = bm.verts.new((cx - nx_n * hp - tx * 0.01, cy - ny_n * hp - ty * 0.01, panel_z_top_abs))
     pf = bm.faces.new([p0, p1, p2, p3])
     pf.material_index = 1
     # UV mapping for sponsor texture
@@ -995,10 +1256,10 @@ def build_start_gantry(cl, norms, start_idx, mat_struct, mat_sponsor, mat_light)
     pf.loops[3][uvl].uv = (0, 1)
 
     # Back face of panel (visible from the other side)
-    pb0 = bm.verts.new((cx - nx_n * hp + tx * 0.01, cy - ny_n * hp + ty * 0.01, panel_z_bot))
-    pb1 = bm.verts.new((cx + nx_n * hp + tx * 0.01, cy + ny_n * hp + ty * 0.01, panel_z_bot))
-    pb2 = bm.verts.new((cx + nx_n * hp + tx * 0.01, cy + ny_n * hp + ty * 0.01, panel_z_top))
-    pb3 = bm.verts.new((cx - nx_n * hp + tx * 0.01, cy - ny_n * hp + ty * 0.01, panel_z_top))
+    pb0 = bm.verts.new((cx - nx_n * hp + tx * 0.01, cy - ny_n * hp + ty * 0.01, panel_z_bot_abs))
+    pb1 = bm.verts.new((cx + nx_n * hp + tx * 0.01, cy + ny_n * hp + ty * 0.01, panel_z_bot_abs))
+    pb2 = bm.verts.new((cx + nx_n * hp + tx * 0.01, cy + ny_n * hp + ty * 0.01, panel_z_top_abs))
+    pb3 = bm.verts.new((cx - nx_n * hp + tx * 0.01, cy - ny_n * hp + ty * 0.01, panel_z_top_abs))
     pbf = bm.faces.new([pb1, pb0, pb3, pb2])
     pbf.material_index = 1
     pbf.loops[0][uvl].uv = (0, 0)
@@ -1007,12 +1268,13 @@ def build_start_gantry(cl, norms, start_idx, mat_struct, mat_sponsor, mat_light)
     pbf.loops[3][uvl].uv = (0, 1)
 
     # 5 red light discs
+    light_z_abs = z_road + light_z
     for i in range(n_lights):
         frac = (i / (n_lights - 1)) - 0.5  # -0.5 to 0.5
         offset = frac * light_spread
         lcx = cx + nx_n * offset
         lcy = cy + ny_n * offset
-        center = bm.verts.new((lcx, lcy, light_z))
+        center = bm.verts.new((lcx, lcy, light_z_abs))
         ring = []
         for s in range(light_seg):
             angle = 2.0 * math.pi * s / light_seg
@@ -1021,7 +1283,7 @@ def build_start_gantry(cl, norms, start_idx, mat_struct, mat_sponsor, mat_light)
             dz = light_r * math.sin(angle)
             vx = lcx + nx_n * dr - tx * 0.02
             vy = lcy + ny_n * dr - ty * 0.02
-            vz = light_z + dz
+            vz = light_z_abs + dz
             ring.append(bm.verts.new((vx, vy, vz)))
         for s in range(light_seg):
             s_next = (s + 1) % light_seg
@@ -1045,7 +1307,8 @@ def build_start_gantry(cl, norms, start_idx, mat_struct, mat_sponsor, mat_light)
 # AC Empties
 # ============================================================
 
-def build_empties(cl, norms, dists, start_idx, start_direction=None):
+def build_empties(cl, norms, dists, start_idx, start_direction=None,
+                  dense_elev=None, dense_banking=None):
     """AC_START, AC_PIT, AC_TIME empties.
 
     start_direction: arrow heading in degrees from the layout editor (math angle,
@@ -1093,10 +1356,15 @@ def build_empties(cl, norms, dists, start_idx, start_direction=None):
             tx /= tl2
             ty /= tl2
             h = math.atan2(-tx, ty)
+        z = 0.0
+        if dense_elev:
+            z = dense_elev[idx]
+            if dense_banking:
+                z += math.sin(dense_banking[idx]) * side_off
         e = bpy.data.objects.new(name, None)
         e.empty_display_type = 'ARROWS'
         e.empty_display_size = 3.0 if name.startswith("AC_TIME") else 1.0
-        e.location = (cx + nx * side_off, cy + ny * side_off, 0)
+        e.location = (cx + nx * side_off, cy + ny * side_off, z)
         e.rotation_euler = Euler((0, 0, h), 'XYZ')
         bpy.context.collection.objects.link(e)
         objs.append(e)
@@ -1163,7 +1431,7 @@ def setup_viewport():
 
 def main():
     print("=" * 60)
-    print("Casaluce — One-shot Blend Initializer (GeoNodes)")
+    print("Track — One-shot Blend Initializer (GeoNodes)")
     print("=" * 60)
 
     if os.path.isfile(BLEND_PATH):
@@ -1190,6 +1458,32 @@ def main():
     dense_ds = cum_distances(dense_ctrl)
     print(f"  Resampled to {len(dense_ctrl)} vertices (every {CURVE_SPACING}m)")
 
+    # Elevation: interpolate from control points to dense stations
+    print("\nComputing elevation...")
+    ctrl_elev = _road_layer.get("elevation", []) if _road_layer else []
+    interp_elev = interpolate_layer_elevation(
+        CONTROL_POINTS, ctrl_elev, len(cl), 20, True)
+    dense_elev = resample_elevation(interp_elev, cl, dense_ctrl)
+    dense_elev = [z * ELEV_SCALE for z in dense_elev]
+    elev_range = max(dense_elev) - min(dense_elev) if dense_elev else 0
+    print(f"  Elevation scale: {ELEV_SCALE}, range: {elev_range:.1f}m")
+
+    # Banking: compute from curvature
+    print("Computing banking...")
+    if BANK_ENABLED:
+        curv = compute_curvature(dense_ctrl)
+        raw_bank = compute_banking(curv, BANK_SPEED, BANK_FRICTION, BANK_SCALE, BANK_MAX)
+        dense_banking = smooth_banking(raw_bank, BANK_SMOOTH)
+        max_bank_deg = math.degrees(max(abs(b) for b in dense_banking)) if dense_banking else 0
+        print(f"  Banking: speed={BANK_SPEED*3.6:.0f}km/h, max={max_bank_deg:.1f}°")
+    else:
+        dense_banking = [0.0] * len(dense_ctrl)
+        print("  Banking: disabled")
+
+    # Build 3D road centerline and tilt lookup
+    cl_3d = [(x, y, dense_elev[i]) for i, (x, y) in enumerate(dense_ctrl)]
+    road_tilt_at = _build_road_tilt_lookup(dense_ctrl, dense_banking)
+
     # Materials
     print("\nCreating materials...")
     m_asp = make_material("mat_asphalt", "asphalt.png", 0.45, 0.7, 0.1, 10)
@@ -1202,30 +1496,39 @@ def main():
     m_light_red = make_color_material("ac_light_red", 0.8, 0.05, 0.05, ks_amb=0.8, ks_dif=0.3, ks_spec=0.5, ks_exp=20.0)
 
     # Road — live RoadGen GeoNodes (not applied)
-    # Uses dense_ctrl (resampled at 2m) for precise polyline editing
-    road_obj = build_road_with_roadgen(dense_ctrl, m_asp)
+    # Uses dense_ctrl (resampled at 2m) with elevation + banking tilts
+    road_obj = build_road_with_roadgen(dense_ctrl, m_asp,
+                                       tilts=dense_banking,
+                                       dense_elev=dense_elev)
 
     # Curbs — from layout layers
     print("\nCreating CurbProfile + CurbGen GeoNodes...")
     curb_profile = create_curb_profile()
     curbgen_ng = create_curbgen_nodegroup()
     print("Building curbs from layout layers...")
-    curbs = build_curbs_from_layers(_curb_layers, curbgen_ng, m_crb, curb_profile)
+    curbs = build_curbs_from_layers(_curb_layers, curbgen_ng, m_crb, curb_profile,
+                                    road_tilt_at=road_tilt_at,
+                                    elev_scale=ELEV_SCALE)
     print(f"  {len(curbs)} curb segments")
 
     # Grass — GeoNodes (path curves at 2m spacing)
     print("\nCreating GrassGen GeoNodes...")
     grassgen_ng = create_grassgen_nodegroup()
     print("Building grass (GeoNodes, live modifiers)...")
-    grass = build_grass_geonodes(dense_ctrl, dense_nm, hw, grassgen_ng, m_grs)
+    grass = build_grass_geonodes(dense_ctrl, dense_nm, hw, grassgen_ng, m_grs,
+                                 dense_elev=dense_elev,
+                                 dense_banking=dense_banking)
+
+    # Ground grid (shared between walls and ground for consistent Z)
+    ground_grid = _build_ground_grid(dense_ctrl, hw, cl_3d) if cl_3d else None
 
     # Walls — bmesh (3 faces per section: outer, inner, top)
     print("\nBuilding walls from layout layers...")
-    walls = build_walls_from_layers(_wall_layers, m_bar)
+    walls = build_walls_from_layers(_wall_layers, m_bar, ground_grid=ground_grid)
 
     # Ground
     print("\nBuilding ground...")
-    build_ground(dense_ctrl, hw, m_gnd)
+    build_ground(dense_ctrl, hw, m_gnd, cl_3d=cl_3d)
 
     # Startline
     print("\nBuilding startline...")
@@ -1236,17 +1539,23 @@ def main():
     else:
         # Default: index 0 (first point of the dense centerline)
         sl_idx = 0
-    build_startline(dense_ctrl, dense_nm, sl_idx, m_sln)
+    sl_z = dense_elev[sl_idx % len(dense_ctrl)]
+    sl_tilt = dense_banking[sl_idx % len(dense_ctrl)]
+    build_startline(dense_ctrl, dense_nm, sl_idx, m_sln,
+                    z_road=sl_z, tilt=sl_tilt)
 
     # Start gantry
     print("\nBuilding start gantry...")
-    build_start_gantry(dense_ctrl, dense_nm, sl_idx, m_bar, m_sponsor, m_light_red)
+    build_start_gantry(dense_ctrl, dense_nm, sl_idx, m_bar, m_sponsor, m_light_red,
+                       z_road=sl_z, tilt=sl_tilt)
 
     # Empties — use same sl_idx as startline so they're aligned
     print("\nBuilding AC empties...")
     arrow_dir = _start_data.get("direction") if _start_data else None
     em = build_empties(dense_ctrl, dense_nm, dense_ds, start_idx=sl_idx,
-                       start_direction=arrow_dir)
+                       start_direction=arrow_dir,
+                       dense_elev=dense_elev,
+                       dense_banking=dense_banking)
     print(f"  {len(em)} empties")
 
     # Organize into collections for clear scene structure
@@ -1310,6 +1619,11 @@ def main():
     print(f"\nSaving {BLEND_PATH}...")
     bpy.ops.wm.save_as_mainfile(filepath=BLEND_PATH)
 
+    # Write fingerprint for blend protection
+    from blend_meta import write_meta
+    write_meta(BLEND_PATH)
+    print(f"  .blend.meta written (SHA256 fingerprint)")
+
     # Summary
     n_geonodes = 1 + len(curbs) + len(grass) + len(walls)  # road + curbs + grass + walls
     print(f"\nDone!")
@@ -1323,7 +1637,7 @@ def main():
     print(f"  2. Edit road (select 1ROAD polyline, edit control points)")
     print(f"  3. Adjust GeoNodes parameters (Width, Height, etc.)")
     print(f"  4. Use ac-track-tools to validate and configure surfaces")
-    print(f"  5. Run: bash build.sh  (or python build_cli.py)")
+    print(f"  5. Run: python build_cli.py")
 
 
 if __name__ == "__main__":

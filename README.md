@@ -6,6 +6,7 @@
 ![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows-lightgrey)
 [![License](https://img.shields.io/badge/license-Apache%202.0-brightgreen)](https://github.com/KinG-InFeT/blender-assetto-corsa-track-generator/blob/main/LICENSE)
 [![GitHub](https://img.shields.io/github/stars/KinG-InFeT/blender-assetto-corsa-track-generator?style=social)](https://github.com/KinG-InFeT/blender-assetto-corsa-track-generator)
+[![Website](https://img.shields.io/badge/website-track--generator-red)](https://assetto-corsa-mods.luongovincenzo.it/generatore-tracciati-assetto-corsa)
 
 Pipeline centralizzata per generare, buildare e installare mod pista per Assetto Corsa da file Blender.
 I progetti pista sono repo data-only; tutta la logica vive qui.
@@ -462,8 +463,8 @@ Valori non specificati in `track_config.json` usano quelli di `defaults.json`.
 
 ## Piste
 
-| Pista | Slug | Reverse | Localita |
-|-------|------|---------|----------|
-| Kartodromo di Casaluce | `casaluce` | Si | Casaluce (CE) |
-| Pista Caudina | `pista_caudina` | No | Montesarchio (BN) |
-| Touch and Go | `touch_and_go` | Si | Martina Franca (TA) |
+| Pista | Slug | Reverse | Localita | Web |
+|-------|------|---------|----------|-----|
+| Kartodromo di Casaluce | `casaluce` | Si | Casaluce (CE) | [Link](https://assetto-corsa-mods.luongovincenzo.it/casaluce) |
+| Pista Caudina | `pista_caudina` | No | Montesarchio (BN) | [Link](https://assetto-corsa-mods.luongovincenzo.it/montesarchio) |
+| Touch and Go | `touch_and_go` | Si | Martina Franca (TA) | [Link](https://assetto-corsa-mods.luongovincenzo.it/martina-franca) |

@@ -11,7 +11,7 @@ import sys
 import urllib.request
 import zipfile
 
-from PyQct5.QtWidgets import (
+from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QPushButton, QLabel, QTextEdit, QProgressBar,
     QListWidget, QListWidgetItem, QGroupBox, QCheckBox,

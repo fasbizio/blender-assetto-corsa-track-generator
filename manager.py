@@ -11,14 +11,14 @@ import sys
 import urllib.request
 import zipfile
 
-from PyQt5.QtWidgets import (
+from PyQct5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QPushButton, QLabel, QTextEdit, QProgressBar,
     QListWidget, QListWidgetItem, QGroupBox, QCheckBox,
     QFormLayout, QDoubleSpinBox, QLineEdit, QComboBox,
     QScrollArea, QSplitter, QFrame, QDialog, QFileDialog,
     QMessageBox, QInputDialog, QButtonGroup, QRadioButton,
-    QTreeWidget, QTreeWidgetItem, QSlider, QStackedWidget,
+    QTreeWidget, QTreeWidgetItem, QSlider,
 )
 from PyQt5.QtCore import (
     Qt, QProcess, QProcessEnvironment, pyqtSignal, QPointF, QTimer,
@@ -32,7 +32,6 @@ from PyQt5.QtGui import (
 GENERATOR_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(GENERATOR_DIR, "scripts"))
 import platform_utils
-from blend_meta import is_blend_modified, backup_blend
 from spline_utils import (
     catmull_rom_point, interpolate_centerline, interpolate_open,
     load_centerline_v2, save_centerline_v2,
@@ -40,20 +39,18 @@ from spline_utils import (
 
 LOG_TERM_STYLE = (
     "QTextEdit { background: #1e1e1e; color: #dcdcdc; "
-    "font-family: 'Consolas', 'Courier New', monospace; font-size: 9pt; border: none; }"
+    "font-family: Monospace; font-size: 9pt; border: none; }"
 )
 
 # Load standard defaults from defaults.json
 _DEFAULTS = {}
 _defaults_path = os.path.join(GENERATOR_DIR, "defaults.json")
 if os.path.isfile(_defaults_path):
-    with open(_defaults_path, encoding="utf-8") as _df:
+    with open(_defaults_path) as _df:
         _DEFAULTS = json.load(_df)
 _def_geo = _DEFAULTS.get("geometry", {})
 _def_ai = _DEFAULTS.get("ai_line", {})
 _def_surf = _DEFAULTS.get("surfaces", {})
-_def_elev = _DEFAULTS.get("elevation", {})
-_def_bank = _DEFAULTS.get("banking", {})
 
 PARAM_DEFS = {
     "geometry": {
@@ -81,21 +78,6 @@ PARAM_DEFS = {
             ("road_friction",  "Road Friction",  _def_surf.get("road_friction", 0.97),  0.5, 1.0, 0.01),
             ("kerb_friction",  "Kerb Friction",  _def_surf.get("kerb_friction", 0.93),  0.5, 1.0, 0.01),
             ("grass_friction", "Grass Friction", _def_surf.get("grass_friction", 0.60), 0.1, 1.0, 0.01),
-        ],
-    },
-    "elevation": {
-        "label": "Elevation",
-        "params": [
-            ("scale", "Scale", _def_elev.get("scale", 1.0), 0.0, 5.0, 0.1),
-        ],
-    },
-    "banking": {
-        "label": "Banking",
-        "params": [
-            ("design_speed", "Design Speed (km/h)", _def_bank.get("design_speed", 60.0), 20.0, 200.0, 5.0),
-            ("friction",     "Friction",            _def_bank.get("friction", 0.7),       0.1,  1.0,   0.05),
-            ("scale",        "Scale",               _def_bank.get("scale", 1.0),          0.0,  3.0,   0.1),
-            ("max_angle",    "Max Angle (°)",       _def_bank.get("max_angle", 15.0),     1.0,  45.0,  1.0),
         ],
     },
 }
@@ -296,7 +278,7 @@ def discover_tracks(parent_dir):
         cfg_path = os.path.join(full, "track_config.json")
         if os.path.isdir(full) and os.path.isfile(cfg_path):
             try:
-                with open(cfg_path, encoding="utf-8") as f:
+                with open(cfg_path) as f:
                     config = json.load(f)
                 tracks.append({"dir": d, "path": full, "config": config})
             except Exception:
@@ -304,12 +286,11 @@ def discover_tracks(parent_dir):
     return tracks
 
 
-def build_steps(config, track_root, force_skip_init=False):
+def build_steps(config, track_root):
     """Build the step list dynamically from config.
 
     Returns list of (label, cmd, env_extra) tuples.
     env_extra is a dict of extra env vars for that step.
-    If *force_skip_init* is True, the Init Blend step is never prepended.
     """
     slug = config.get("slug", "track")
     has_reverse = config.get("layouts", {}).get("reverse", False)
@@ -373,7 +354,7 @@ def build_steps(config, track_root, force_skip_init=False):
              {}),
         ]
 
-    if needs_init and not force_skip_init:
+    if needs_init:
         steps.insert(0, ("Init Blend", [blender, "--background", "--python", init_blend_py], {}))
         # Re-label all steps
         total = len(steps)
@@ -456,8 +437,6 @@ class ParametersPanel(QWidget):
             "geometry": "Parametri geometrici che controllano la generazione 3D della pista",
             "ai_line": "Velocità dell'IA: regolano il comportamento delle auto guidate dal computer",
             "surfaces": "Coefficienti d'attrito delle superfici (1.0 = grip massimo)",
-            "elevation": "Elevazione del terreno da dati SRTM (0=piatto, 1=reale, >1=esagerato)",
-            "banking": "Inclinazione laterale della strada in curva (superelevazione)",
         }
         for group_key, group_def in PARAM_DEFS.items():
             group_box = QGroupBox()
@@ -469,18 +448,6 @@ class ParametersPanel(QWidget):
                 gh.addWidget(make_info_label(tip_text))
             gh.addStretch()
             group_top.addLayout(gh)
-
-            # Banking: add enable checkbox before spinboxes
-            if group_key == "banking":
-                bank_chk_row = QHBoxLayout()
-                self.chk_banking_enabled = QCheckBox("Enable banking")
-                self.chk_banking_enabled.setChecked(_def_bank.get("enabled", True))
-                self.chk_banking_enabled.setToolTip(
-                    "Attiva/disattiva l'inclinazione laterale automatica in curva")
-                bank_chk_row.addWidget(self.chk_banking_enabled)
-                bank_chk_row.addStretch()
-                group_top.addLayout(bank_chk_row)
-
             form = QFormLayout()
             for key, label, default, vmin, vmax, step in group_def["params"]:
                 spin = QDoubleSpinBox()
@@ -560,8 +527,6 @@ class ParametersPanel(QWidget):
                     data["info"][key] = val
 
         data["layouts"] = {"reverse": self.chk_reverse.isChecked()}
-        # Banking enabled checkbox (not a spinbox, separate handling)
-        data.setdefault("banking", {})["enabled"] = self.chk_banking_enabled.isChecked()
         return data
 
     def _set_values(self, data):
@@ -576,10 +541,6 @@ class ParametersPanel(QWidget):
             for key, _label, _default, _vmin, _vmax, _step in group_def["params"]:
                 if key in group_data:
                     self._widgets[f"{group_key}.{key}"].setValue(group_data[key])
-
-        # Banking enabled checkbox
-        bank_enabled = data.get("banking", {}).get("enabled", _def_bank.get("enabled", True))
-        self.chk_banking_enabled.setChecked(bank_enabled)
 
         # Info
         info_data = data.get("info", {})
@@ -604,7 +565,7 @@ class ParametersPanel(QWidget):
         # Merge with existing config to preserve camera, slug, etc.
         if os.path.isfile(self._config_file):
             try:
-                with open(self._config_file, encoding="utf-8") as f:
+                with open(self._config_file) as f:
                     existing = json.load(f)
                 for k, v in existing.items():
                     if k not in data:
@@ -612,7 +573,7 @@ class ParametersPanel(QWidget):
             except Exception:
                 pass
         try:
-            with open(self._config_file, "w", encoding="utf-8") as f:
+            with open(self._config_file, "w") as f:
                 json.dump(data, f, indent=2)
             flash_status(self.status_label, "Parametri salvati", "#55cc55")
         except Exception as e:
@@ -623,7 +584,7 @@ class ParametersPanel(QWidget):
             flash_status(self.status_label, "File config non trovato", "#e8a838")
             return
         try:
-            with open(self._config_file, encoding="utf-8") as f:
+            with open(self._config_file) as f:
                 data = json.load(f)
             self._set_values(data)
             flash_status(self.status_label, "Parametri caricati", "#55cc55")
@@ -730,58 +691,6 @@ class NewTrackDialog(QDialog):
 # Tab 2: Layout Editor (multi-layer)
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Elevation helpers (SRTM + CubicSpline — manager-only, NOT for Blender Python)
-# ---------------------------------------------------------------------------
-
-def _world_to_latlon(wx, wy, map_center):
-    """Convert local meter coordinates to lat/lon for SRTM queries."""
-    lat = map_center[0] + wy / 111320.0
-    lon = map_center[1] + wx / (111320.0 * math.cos(math.radians(map_center[0])))
-    return lat, lon
-
-
-def _fetch_srtm_elevation(points, map_center):
-    """Query SRTM elevation for control points (meters from map_center).
-
-    Returns list of Z values (meters). Returns 0.0 for failed queries.
-    """
-    try:
-        import srtm
-    except ImportError:
-        return [0.0] * len(points)
-    data = srtm.get_data()
-    elevations = []
-    for wx, wy in points:
-        lat, lon = _world_to_latlon(wx, wy, map_center)
-        try:
-            z = data.get_elevation(lat, lon)
-            elevations.append(z if z is not None else 0.0)
-        except Exception:
-            elevations.append(0.0)
-    return elevations
-
-
-def _smooth_elevation(raw_elev, closed):
-    """Smooth elevation with CubicSpline (periodic for closed, natural for open)."""
-    try:
-        from scipy.interpolate import CubicSpline
-    except ImportError:
-        return list(raw_elev)
-    n = len(raw_elev)
-    if n < 3:
-        return list(raw_elev)
-    if closed:
-        x = list(range(n + 1))
-        y = list(raw_elev) + [raw_elev[0]]
-        cs = CubicSpline(x, y, bc_type='periodic')
-        return [float(cs(i)) for i in range(n)]
-    else:
-        x = list(range(n))
-        cs = CubicSpline(x, raw_elev, bc_type='natural')
-        return [float(cs(i)) for i in range(n)]
-
-
 LAYER_COLORS = {
     "road": QColor(80, 180, 255),
     "curb": QColor(255, 120, 60),
@@ -792,12 +701,11 @@ START_COLOR = QColor(60, 220, 60)
 
 # -- Map tile constants --
 
-TILE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-if platform_utils.IS_WINDOWS:
-    _cache_base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
-else:
-    _cache_base = os.path.join(os.path.expanduser("~"), ".cache")
-TILE_CACHE_DIR = os.path.join(_cache_base, "ac-track-manager", "tiles")
+TILE_URLS = {
+    "satellite": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    "street": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+}
+TILE_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "ac-track-manager", "tiles")
 MAP_ZOOM_DEFAULT = 14
 MAP_RADIUS = 3  # 7x7 = 49 tiles
 
@@ -822,21 +730,16 @@ def _tile_to_latlon(tx, ty, zoom):
 class TileFetcher(QThread):
     """Background thread for downloading map tiles."""
 
-    tile_ready = pyqtSignal(int, int, int)
+    tile_ready = pyqtSignal(str, int, int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._queue = queue.Queue()
         self._running = True
         self._pending = set()
-        # Clean up old provider-based cache dirs (v3.0.0 → v3.1.0 migration)
-        for old_dir in ("satellite", "street"):
-            old_path = os.path.join(TILE_CACHE_DIR, old_dir)
-            if os.path.isdir(old_path):
-                shutil.rmtree(old_path, ignore_errors=True)
 
-    def request_tile(self, z, x, y):
-        key = (z, x, y)
+    def request_tile(self, provider, z, x, y):
+        key = (provider, z, x, y)
         if key not in self._pending:
             self._pending.add(key)
             self._queue.put(key)
@@ -847,10 +750,10 @@ class TileFetcher(QThread):
                 key = self._queue.get(timeout=0.2)
             except queue.Empty:
                 continue
-            z, x, y = key
-            cache_path = os.path.join(TILE_CACHE_DIR, str(z), str(x), f"{y}.png")
+            provider, z, x, y = key
+            cache_path = os.path.join(TILE_CACHE_DIR, provider, str(z), str(x), f"{y}.png")
             if not os.path.isfile(cache_path):
-                url = TILE_URL.format(z=z, x=x, y=y)
+                url = TILE_URLS[provider].format(z=z, x=x, y=y)
                 try:
                     req = urllib.request.Request(url, headers={"User-Agent": "AC-Track-Manager/1.0"})
                     with urllib.request.urlopen(req, timeout=10) as resp:
@@ -862,7 +765,7 @@ class TileFetcher(QThread):
                     self._pending.discard(key)
                     continue
             self._pending.discard(key)
-            self.tile_ready.emit(z, x, y)
+            self.tile_ready.emit(provider, z, x, y)
 
     def stop(self):
         self._running = False
@@ -878,24 +781,19 @@ class TrackLayer:
         self.closed = closed
         self.points = points or []
         self.visible = True
-        self.elevation = []
 
     def to_dict(self):
-        d = {
+        return {
             "name": self.name,
             "type": self.layer_type,
             "closed": self.closed,
             "points": [list(p) for p in self.points],
         }
-        if self.elevation:
-            d["elevation"] = list(self.elevation)
-        return d
 
     @classmethod
     def from_dict(cls, d):
         layer = cls(d["name"], d["type"], d.get("closed", d["type"] == "road"),
                      [list(p) for p in d.get("points", [])])
-        layer.elevation = d.get("elevation", [])
         return layer
 
 
@@ -923,6 +821,7 @@ class TrackCanvas(QWidget):
         # Map tile state
         self._map_center = None     # (lat, lon) or None
         self._map_visible = True
+        self._map_provider = "satellite"
         self._map_opacity = 0.5
         self._map_image = None      # pre-composed QImage of all tiles
         self._map_world_origin = (0.0, 0.0)  # world coords of image top-left
@@ -951,23 +850,11 @@ class TrackCanvas(QWidget):
         self.setMinimumSize(400, 400)
         self.setFocusPolicy(Qt.StrongFocus)
 
-        # Road edge cache for snap & road strip
-        self._road_hw = 3.0  # half road width
-        self._road_edges_dirty = True
-        self._road_left_edge = []
-        self._road_right_edge = []
-        self._snap_preview = None
-        self.points_changed.connect(self._invalidate_road_edges)
-
     # -- Public API --
 
     def set_layers(self, layers):
         self._layers = layers
         self._active_layer_idx = 0 if layers else -1
-        self._road_edges_dirty = True
-        self._road_left_edge = []
-        self._road_right_edge = []
-        self._snap_preview = None
         self._auto_fit()
         self.update()
 
@@ -991,7 +878,6 @@ class TrackCanvas(QWidget):
             self._active_layer_idx = idx
             self._hover_idx = -1
             self._drag_idx = -1
-            self._snap_preview = None
             self.update()
 
     def get_active_layer(self):
@@ -1014,6 +900,11 @@ class TrackCanvas(QWidget):
     def get_map_center(self):
         return self._map_center
 
+    def set_map_provider(self, provider):
+        self._map_provider = provider
+        self._map_image = None
+        self._request_map_tiles()
+
     def set_map_visible(self, visible):
         self._map_visible = visible
         self.update()
@@ -1027,81 +918,7 @@ class TrackCanvas(QWidget):
         self._drag_idx = -1
         self._hover_idx = -1
         self._start_drag = False
-        self._snap_preview = None
         self.update()
-
-    def set_road_width(self, width):
-        self._road_hw = width / 2.0
-        self._road_edges_dirty = True
-        self._resnap_curb_points()
-        self.update()
-
-    def _invalidate_road_edges(self):
-        self._road_edges_dirty = True
-        self._snap_preview = None
-        # Re-snap curb points when road geometry changes
-        active = self.get_active_layer()
-        if active and active.layer_type == "road":
-            self._resnap_curb_points()
-
-    def _ensure_road_edges(self):
-        if not self._road_edges_dirty:
-            return
-        self._road_edges_dirty = False
-        self._road_left_edge = []
-        self._road_right_edge = []
-        road = None
-        for layer in self._layers:
-            if layer.layer_type == "road" and layer.closed and len(layer.points) >= 3:
-                road = layer
-                break
-        if not road:
-            return
-        spline = interpolate_centerline(road.points, pts_per_seg=20)
-        n = len(spline)
-        if n < 2:
-            return
-        hw = self._road_hw
-        for i in range(n):
-            x0, y0 = spline[i]
-            x1, y1 = spline[(i + 1) % n]
-            tx, ty = x1 - x0, y1 - y0
-            length = math.hypot(tx, ty)
-            if length < 1e-9:
-                continue
-            nx, ny = -ty / length, tx / length
-            self._road_left_edge.append((x0 + nx * hw, y0 + ny * hw))
-            self._road_right_edge.append((x0 - nx * hw, y0 - ny * hw))
-
-    def _nearest_road_edge_point(self, wx, wy):
-        self._ensure_road_edges()
-        if not self._road_left_edge:
-            return None
-        best_d2 = float('inf')
-        best = None
-        for ex, ey in self._road_left_edge:
-            d2 = (ex - wx) ** 2 + (ey - wy) ** 2
-            if d2 < best_d2:
-                best_d2 = d2
-                best = (ex, ey)
-        for ex, ey in self._road_right_edge:
-            d2 = (ex - wx) ** 2 + (ey - wy) ** 2
-            if d2 < best_d2:
-                best_d2 = d2
-                best = (ex, ey)
-        return best
-
-    def _resnap_curb_points(self):
-        self._ensure_road_edges()
-        if not self._road_left_edge:
-            return
-        for layer in self._layers:
-            if layer.layer_type != "curb" or not layer.points:
-                continue
-            for pt in layer.points:
-                snapped = self._nearest_road_edge_point(pt[0], pt[1])
-                if snapped:
-                    pt[0], pt[1] = snapped
 
     # -- Coordinate transforms --
 
@@ -1199,12 +1016,7 @@ class TrackCanvas(QWidget):
                 self._drag_idx = idx
             else:
                 wx, wy = self.pixel_to_world(px, py)
-                if layer.layer_type == "curb":
-                    snapped = self._nearest_road_edge_point(wx, wy)
-                    if snapped:
-                        wx, wy = snapped
                 layer.points.append([wx, wy])
-                layer.elevation = []
                 self._drag_idx = len(layer.points) - 1
                 self.points_changed.emit()
                 self.update()
@@ -1212,7 +1024,6 @@ class TrackCanvas(QWidget):
             idx = self._point_at(px, py)
             if idx >= 0:
                 layer.points.pop(idx)
-                layer.elevation = []
                 self._hover_idx = -1
                 self.points_changed.emit()
                 self.update()
@@ -1229,9 +1040,6 @@ class TrackCanvas(QWidget):
 
     def mouseReleaseEvent(self, event):
         if self._edit_mode == "points" and self._drag_idx >= 0:
-            layer = self.get_active_layer()
-            if layer:
-                layer.elevation = []
             self._drag_idx = -1
             self.points_changed.emit()
         if self._edit_mode == "move" and (self._move_drag or self._rotate_drag):
@@ -1299,24 +1107,12 @@ class TrackCanvas(QWidget):
             return
         if self._drag_idx >= 0:
             wx, wy = self.pixel_to_world(px, py)
-            if layer.layer_type == "curb":
-                snapped = self._nearest_road_edge_point(wx, wy)
-                if snapped:
-                    wx, wy = snapped
             layer.points[self._drag_idx] = [wx, wy]
-            if layer.layer_type == "road":
-                self._road_edges_dirty = True
             self.update()
             return
-        old_hover = self._hover_idx
+        old = self._hover_idx
         self._hover_idx = self._point_at(px, py)
-        old_snap = self._snap_preview
-        if layer.layer_type == "curb" and self._hover_idx < 0:
-            wx, wy = self.pixel_to_world(px, py)
-            self._snap_preview = self._nearest_road_edge_point(wx, wy)
-        else:
-            self._snap_preview = None
-        if old_hover != self._hover_idx or old_snap != self._snap_preview:
+        if old != self._hover_idx:
             self.update()
 
     def wheelEvent(self, event):
@@ -1351,13 +1147,6 @@ class TrackCanvas(QWidget):
             if layer.visible:
                 self._draw_layer(p, layer, i == self._active_layer_idx)
 
-        # Snap preview ghost point
-        if self._snap_preview:
-            sx, sy = self.world_to_pixel(self._snap_preview[0], self._snap_preview[1])
-            p.setPen(QPen(QColor(255, 255, 255), 1.5))
-            p.setBrush(QBrush(QColor(255, 160, 40, 120)))
-            p.drawEllipse(QPointF(sx, sy), 7, 7)
-
         # Start marker
         self._draw_start_marker(p)
 
@@ -1371,15 +1160,6 @@ class TrackCanvas(QWidget):
         wx = (lon - clon) * 111320.0 * math.cos(math.radians(clat))
         wy = (lat - clat) * 111320.0
         return wx, wy
-
-    def _world_to_latlon(self, wx, wy):
-        """Convert world coordinates (meters from map center) to lat/lon."""
-        if not self._map_center:
-            return 0.0, 0.0
-        clat, clon = self._map_center
-        lat = clat + wy / 111320.0
-        lon = clon + wx / (111320.0 * math.cos(math.radians(clat)))
-        return lat, lon
 
     def _tile_zoom(self):
         """Compute tile zoom level matching the current canvas scale."""
@@ -1403,9 +1183,10 @@ class TrackCanvas(QWidget):
         view_lon = clon + view_wx / (111320.0 * cos_lat)
         z = self._tile_zoom()
         cx, cy = _latlon_to_tile(view_lat, view_lon, z)
+        provider = self._map_provider
         for dx in range(-MAP_RADIUS, MAP_RADIUS + 1):
             for dy in range(-MAP_RADIUS, MAP_RADIUS + 1):
-                self._tile_fetcher.request_tile(z, cx + dx, cy + dy)
+                self._tile_fetcher.request_tile(provider, z, cx + dx, cy + dy)
         self._compose_map_image()
 
     def _compose_map_image(self):
@@ -1419,6 +1200,7 @@ class TrackCanvas(QWidget):
         view_lon = clon + view_wx / (111320.0 * cos_lat)
         z = self._tile_zoom()
         cx, cy = _latlon_to_tile(view_lat, view_lon, z)
+        provider = self._map_provider
         grid = 2 * MAP_RADIUS + 1
         tile_px = 256
         img = QImage(grid * tile_px, grid * tile_px, QImage.Format_ARGB32)
@@ -1428,7 +1210,7 @@ class TrackCanvas(QWidget):
         for dx in range(-MAP_RADIUS, MAP_RADIUS + 1):
             for dy in range(-MAP_RADIUS, MAP_RADIUS + 1):
                 tx, ty = cx + dx, cy + dy
-                cache_path = os.path.join(TILE_CACHE_DIR, str(z), str(tx), f"{ty}.png")
+                cache_path = os.path.join(TILE_CACHE_DIR, provider, str(z), str(tx), f"{ty}.png")
                 if os.path.isfile(cache_path):
                     tile_img = QImage(cache_path)
                     if not tile_img.isNull():
@@ -1464,7 +1246,7 @@ class TrackCanvas(QWidget):
         painter.drawImage(target, self._map_image)
         painter.setOpacity(1.0)
 
-    def _on_tile_ready(self, z, x, y):
+    def _on_tile_ready(self, provider, z, x, y):
         # Debounce: restart timer on each tile arrival
         self._compose_timer.start()
 
@@ -1508,39 +1290,8 @@ class TrackCanvas(QWidget):
         color = LAYER_COLORS.get(layer.layer_type, QColor(200, 200, 200))
         dim_color = LAYER_COLORS_DIM.get(layer.layer_type, QColor(200, 200, 200, 80))
 
-        # Draw road strip (semi-transparent width polygon)
-        pts = layer.points
-        if layer.layer_type == "road" and layer.closed and len(pts) >= 3:
-            self._ensure_road_edges()
-            left = self._road_left_edge
-            right = self._road_right_edge
-            if left and right:
-                poly = QPolygonF()
-                for lx, ly in left:
-                    px_l, py_l = self.world_to_pixel(lx, ly)
-                    poly.append(QPointF(px_l, py_l))
-                for rx, ry in reversed(right):
-                    px_r, py_r = self.world_to_pixel(rx, ry)
-                    poly.append(QPointF(px_r, py_r))
-                p.setPen(Qt.NoPen)
-                p.setBrush(QBrush(QColor(80, 180, 255, 30)))
-                p.drawPolygon(poly)
-                # Edge lines
-                edge_alpha = 100 if is_active else 40
-                edge_pen = QPen(QColor(80, 180, 255, edge_alpha), 1)
-                p.setPen(edge_pen)
-                for edge in (left, right):
-                    for i in range(len(edge) - 1):
-                        x0, y0 = self.world_to_pixel(edge[i][0], edge[i][1])
-                        x1, y1 = self.world_to_pixel(edge[i + 1][0], edge[i + 1][1])
-                        p.drawLine(int(x0), int(y0), int(x1), int(y1))
-                    # Close loop
-                    if len(edge) >= 2:
-                        x0, y0 = self.world_to_pixel(edge[-1][0], edge[-1][1])
-                        x1, y1 = self.world_to_pixel(edge[0][0], edge[0][1])
-                        p.drawLine(int(x0), int(y0), int(x1), int(y1))
-
         # Draw spline
+        pts = layer.points
         if layer.closed and len(pts) >= 3:
             spline = interpolate_centerline(pts, pts_per_seg=20)
             if len(spline) >= 2:
@@ -1782,6 +1533,16 @@ class TrackEditorPanel(QWidget):
         self._suggest_timer.timeout.connect(self._fetch_suggestions)
         self._suggest_results = []
 
+        # Provider combo
+        provider_row = QHBoxLayout()
+        provider_row.addWidget(QLabel("Tipo:"))
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItems(["Satellite", "Mappa stradale"])
+        self.provider_combo.setToolTip("Scegli il tipo di mappa di sfondo")
+        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        provider_row.addWidget(self.provider_combo)
+        sidebar.addLayout(provider_row)
+
         # Visibility checkbox
         self.chk_map_visible = QCheckBox("Mostra mappa")
         self.chk_map_visible.setChecked(True)
@@ -1805,48 +1566,12 @@ class TrackEditorPanel(QWidget):
         self.coord_label.setStyleSheet("color: #888; font-size: 8pt;")
         sidebar.addWidget(self.coord_label)
 
-        # --- Elevation section ---
-        sep_elev = QFrame()
-        sep_elev.setFrameShape(QFrame.HLine)
-        sep_elev.setFrameShadow(QFrame.Sunken)
-        sidebar.addWidget(sep_elev)
-        sidebar.addWidget(QLabel("<b>Elevation</b>"))
-
-        self.btn_fetch_elev = QPushButton("Fetch Elevation (SRTM)")
-        self.btn_fetch_elev.setToolTip(
-            "Scarica i dati di elevazione SRTM per tutti i punti di controllo")
-        self.btn_fetch_elev.clicked.connect(self._on_fetch_elevation)
-        sidebar.addWidget(self.btn_fetch_elev)
-
-        self.elev_stats_label = QLabel("")
-        self.elev_stats_label.setStyleSheet("color: #aaa; font-size: 8pt;")
-        sidebar.addWidget(self.elev_stats_label)
-
-        self.btn_reset_elev = QPushButton("Reset Elevation")
-        self.btn_reset_elev.setToolTip(
-            "Rimuovi i dati di elevazione da tutti i layer (pista piatta)")
-        self.btn_reset_elev.clicked.connect(self._on_reset_elevation)
-        sidebar.addWidget(self.btn_reset_elev)
-
         sidebar.addStretch()
         body.addLayout(sidebar)
         main_layout.addLayout(body, stretch=1)
 
-    def load_track(self, track_root, config=None):
+    def load_track(self, track_root):
         self._track_root = track_root
-
-        # Extract road_width from config (or read track_config.json for _reload)
-        if config is None:
-            cfg_path = os.path.join(track_root, "track_config.json")
-            if os.path.isfile(cfg_path):
-                with open(cfg_path, encoding="utf-8") as f:
-                    config = json.load(f)
-            else:
-                config = {}
-        geo = config.get("geometry", {})
-        road_width = geo.get("road_width", _def_geo.get("road_width", 6.0))
-        self.canvas.set_road_width(road_width)
-
         cl_path = os.path.join(track_root, "centerline.json")
         try:
             data = load_centerline_v2(cl_path)
@@ -1869,9 +1594,6 @@ class TrackEditorPanel(QWidget):
                 self.canvas._map_center = None
                 self.coord_label.setText("")
 
-            # Restore search text
-            self.search_edit.setText(data.get("map_search") or "")
-
             self._refresh_layer_list()
             n_layers = len(layers)
             total_pts = sum(len(l.points) for l in layers)
@@ -1892,12 +1614,10 @@ class TrackEditorPanel(QWidget):
         if start_pos:
             start_data = {"position": start_pos, "direction": start_dir}
 
-        search_text = self.search_edit.text().strip()
         data = {
             "layers": [l.to_dict() for l in layers],
             "start": start_data,
             "map_center": list(mc) if mc else None,
-            "map_search": search_text or None,
         }
         cl_path = os.path.join(self._track_root, "centerline.json")
         try:
@@ -2062,91 +1782,15 @@ class TrackEditorPanel(QWidget):
             flash_status(self.status_label, f"Trovato: {item.text()}", "#55cc55")
         self._suggest_list.hide()
 
+    def _on_provider_changed(self, index):
+        provider = "satellite" if index == 0 else "street"
+        self.canvas.set_map_provider(provider)
 
     def _on_map_visible_changed(self, checked):
         self.canvas.set_map_visible(checked)
 
     def _on_opacity_changed(self, value):
         self.canvas.set_map_opacity(value / 100.0)
-
-    def _on_fetch_elevation(self):
-        """Fetch SRTM elevation for all layers' control points."""
-        map_center = self.canvas._map_center
-        if not map_center:
-            flash_status(self.status_label,
-                         "Nessun map_center — cerca una località prima", "#e8a838")
-            return
-
-        layers = self.canvas._layers
-        if not layers:
-            flash_status(self.status_label, "Nessun layer", "#e8a838")
-            return
-
-        total_pts = sum(len(l.points) for l in layers)
-        flash_status(self.status_label,
-                     f"Fetching SRTM per {total_pts} punti...", "#5599ff")
-        QApplication.processEvents()
-
-        failed = 0
-        all_smoothed = []
-        for layer in layers:
-            if not layer.points:
-                all_smoothed.append([])
-                continue
-            raw = _fetch_srtm_elevation(layer.points, map_center)
-            n_failed = sum(1 for z in raw if z == 0.0)
-            failed += n_failed
-            smoothed = _smooth_elevation(raw, layer.closed)
-            all_smoothed.append(smoothed)
-
-        # Global minimum across ALL layers for spatial coherence
-        all_values = [z for s in all_smoothed for z in s]
-        global_min = min(all_values) if all_values else 0.0
-
-        for layer, smoothed in zip(layers, all_smoothed):
-            if not smoothed:
-                continue
-            layer.elevation = [z - global_min for z in smoothed]
-
-        # Update stats label
-        road = next((l for l in layers if l.layer_type == "road"), None)
-        if road and road.elevation:
-            e_min = min(road.elevation)
-            e_max = max(road.elevation)
-            delta = e_max - e_min
-            self.elev_stats_label.setText(
-                f"Min: {e_min:.1f}m  Max: {e_max:.1f}m  Δ: {delta:.1f}m")
-        else:
-            self.elev_stats_label.setText("")
-
-        self._save()
-        msg = f"Elevation fetched ({total_pts} punti)"
-        if failed:
-            msg += f" — {failed} falliti (=0.0m)"
-        flash_status(self.status_label, msg, "#55cc55" if not failed else "#e8a838")
-
-    def _update_elevation_stats(self):
-        """Update the elevation stats label from cached data."""
-        layers = self.canvas._layers if hasattr(self.canvas, '_layers') else []
-        road = next((l for l in layers if l.layer_type == "road"), None)
-        if road and road.elevation:
-            e_min = min(road.elevation)
-            e_max = max(road.elevation)
-            self.elev_stats_label.setText(
-                f"Min: {e_min:.1f}m  Max: {e_max:.1f}m  Δ: {e_max - e_min:.1f}m")
-        else:
-            self.elev_stats_label.setText("")
-
-    def _on_reset_elevation(self):
-        """Clear elevation data from all layers (flat track)."""
-        layers = self.canvas._layers
-        if not layers:
-            return
-        for layer in layers:
-            layer.elevation = []
-        self.elev_stats_label.setText("")
-        self._save()
-        flash_status(self.status_label, "Elevation rimossa da tutti i layer", "#55cc55")
 
 
 # ---------------------------------------------------------------------------
@@ -2479,7 +2123,7 @@ class BuildPanel(QWidget):
         # Re-read config from disk (may have been edited via Parameters tab)
         config_path = os.path.join(track_root, "track_config.json")
         try:
-            with open(config_path, encoding="utf-8") as f:
+            with open(config_path) as f:
                 config = json.load(f)
         except Exception:
             pass
@@ -2529,73 +2173,16 @@ class BuildPanel(QWidget):
             return
         config_path = os.path.join(self._track_root, "track_config.json")
         try:
-            with open(config_path, encoding="utf-8") as f:
+            with open(config_path) as f:
                 self._config = json.load(f)
             self._steps = build_steps(self._config, self._track_root)
         except Exception:
             pass
 
-    def _check_blend_protection(self):
-        """Check if .blend was modified manually before regenerating.
-
-        Returns:
-            "regenerate" — proceed with init (backup done if needed).
-            "skip"       — skip init, build from current .blend.
-            None         — user cancelled.
-        """
-        if not self._config or not self._track_root:
-            return "regenerate"
-        slug = self._config.get("slug", "track")
-        blend_file = os.path.join(self._track_root, f"{slug}.blend")
-        centerline_file = os.path.join(self._track_root, "centerline.json")
-
-        # Same mtime check as build_steps — would init be triggered?
-        would_init = not os.path.isfile(blend_file)
-        if not would_init and os.path.isfile(centerline_file):
-            if os.path.getmtime(centerline_file) > os.path.getmtime(blend_file):
-                would_init = True
-        if not would_init:
-            return "regenerate"
-
-        # .blend doesn't exist yet — nothing to protect
-        if not os.path.isfile(blend_file):
-            return "regenerate"
-
-        modified = is_blend_modified(blend_file)
-        if not modified:
-            return "regenerate"
-
-        # Show dialog
-        msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Warning)
-        msg.setWindowTitle("Blend modificato")
-        msg.setText(
-            f"<b>{slug}.blend</b> è stato modificato manualmente.<br>"
-            "Rigenerare sovrascriverà le modifiche."
-        )
-        btn_regen = msg.addButton("Rigenera (con backup)", QMessageBox.AcceptRole)
-        btn_skip = msg.addButton("Usa .blend attuale", QMessageBox.ActionRole)
-        msg.addButton("Annulla", QMessageBox.RejectRole)
-        msg.exec_()
-
-        clicked = msg.clickedButton()
-        if clicked == btn_regen:
-            bak = backup_blend(blend_file)
-            self._append_log(f"Backup: {os.path.basename(bak)}", "#e8a838")
-            return "regenerate"
-        elif clicked == btn_skip:
-            return "skip"
-        return None
-
     def _build_all(self):
         if not self._steps:
             return
         self._refresh_config()
-        result = self._check_blend_protection()
-        if result is None:
-            return
-        force_skip = result == "skip"
-        self._steps = build_steps(self._config, self._track_root, force_skip_init=force_skip)
         self.log.clear()
         self.progress.setRange(0, len(self._steps))
         self.progress.setValue(0)
@@ -2619,11 +2206,6 @@ class BuildPanel(QWidget):
         if not self._steps:
             return
         self._refresh_config()
-        result = self._check_blend_protection()
-        if result is None:
-            return
-        force_skip = result == "skip"
-        self._steps = build_steps(self._config, self._track_root, force_skip_init=force_skip)
         self.log.clear()
         self.progress.setRange(0, len(self._steps) + 1)
         self.progress.setValue(0)
@@ -2797,156 +2379,11 @@ class BuildPanel(QWidget):
 
     def _stop(self):
         if self._process and self._process.state() != QProcess.NotRunning:
-            self._process.terminate()
-            if not self._process.waitForFinished(3000):
-                self._process.kill()
+            self._process.kill()
         self._queue.clear()
         self._set_running(False)
         self.status_label.setText("Stopped")
         self._append_log("Build stopped by user.", "#ff5555")
-
-
-# ---------------------------------------------------------------------------
-# Dashboard (landing page)
-# ---------------------------------------------------------------------------
-
-_APP_VERSION = "3.1.0"
-_GITHUB_REPO = "https://github.com/KinG-InFeT/blender-assetto-corsa-track-generator"
-
-_TRACK_REPOS = [
-    ("Kartodromo di Casaluce", "casaluce-track",
-     "https://github.com/KinG-InFeT/casaluce-track"),
-    ("Pista Caudina", "montesarchio-track-ac-mod",
-     "https://github.com/KinG-InFeT/montesarchio-track-ac-mod"),
-    ("Touch and Go", "touch-and-go-martina-franca-track",
-     "https://github.com/KinG-InFeT/touch-and-go-martina-franca-track"),
-]
-
-_BADGE_LABEL_CSS = (
-    "background: #333; color: #ddd; font-size: 9pt; font-weight: bold;"
-    "padding: 3px 6px; border-top-left-radius: 4px; border-bottom-left-radius: 4px;"
-)
-
-
-def _make_badge(label_text, value_text, value_color, link=None):
-    """Return a QWidget styled as a shields.io-like badge, optionally clickable."""
-    widget = QWidget()
-    h = QHBoxLayout(widget)
-    h.setContentsMargins(0, 0, 0, 0)
-    h.setSpacing(0)
-
-    lbl = QLabel(label_text)
-    lbl.setStyleSheet(_BADGE_LABEL_CSS)
-    h.addWidget(lbl)
-
-    val = QLabel(value_text)
-    if link:
-        val = QLabel(f'<a href="{link}" style="color: #fff; text-decoration: none;">{value_text}</a>')
-        val.setOpenExternalLinks(True)
-    val.setStyleSheet(
-        f"background: {value_color}; color: #fff; font-size: 9pt; font-weight: bold;"
-        "padding: 3px 8px; border-top-right-radius: 4px; border-bottom-right-radius: 4px;"
-    )
-    h.addWidget(val)
-    return widget
-
-
-class DashboardPanel(QWidget):
-    """Landing page shown when no track is selected."""
-
-    track_cloned = pyqtSignal(str)  # emits cloned folder path
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.addStretch(3)
-
-        title = QLabel("Track Manager Hub")
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font-size: 28pt; font-weight: bold; color: #ccc;")
-        layout.addWidget(title)
-
-        subtitle = QLabel("Seleziona una pista dalla lista per iniziare")
-        subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setStyleSheet("font-size: 12pt; color: #777; margin-top: 12px;")
-        layout.addWidget(subtitle)
-
-        layout.addStretch(1)
-
-        # Track repos section
-        tracks_label = QLabel("PISTE DISPONIBILI")
-        tracks_label.setAlignment(Qt.AlignCenter)
-        tracks_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #888;")
-        layout.addWidget(tracks_label)
-        layout.addSpacing(6)
-
-        for name, repo_name, url in _TRACK_REPOS:
-            row = QHBoxLayout()
-            row.addStretch()
-            row.addWidget(_make_badge("track", name, "#c9510c", url))
-            row.addSpacing(8)
-            btn = QPushButton("Clone")
-            btn.setStyleSheet(
-                "QPushButton { background: #2a6e2a; padding: 4px 12px; font-size: 9pt; font-weight: bold; }"
-                "QPushButton:hover { background: #358535; }"
-            )
-            btn.setToolTip(f"Clona {repo_name} nella cartella del progetto")
-            btn.clicked.connect(lambda checked, u=url, r=repo_name: self._clone_repo(u, r))
-            row.addWidget(btn)
-            row.addStretch()
-            layout.addLayout(row)
-            layout.addSpacing(4)
-
-        layout.addStretch(2)
-
-        # Project badges row
-        badges = QHBoxLayout()
-        badges.addStretch()
-        badges.addWidget(_make_badge("version", _APP_VERSION, "#0969da"))
-        badges.addSpacing(8)
-        badges.addWidget(_make_badge("license", "Apache 2.0", "#2ea043"))
-        badges.addSpacing(8)
-        badges.addWidget(_make_badge("github", "blender-assetto-corsa-track-generator", "#6e40c9", _GITHUB_REPO))
-        badges.addStretch()
-        layout.addLayout(badges)
-
-        layout.addSpacing(16)
-
-    def _clone_repo(self, url, repo_name):
-        parent_dir = os.path.dirname(GENERATOR_DIR)
-        dest = os.path.join(parent_dir, repo_name)
-        if os.path.isdir(dest):
-            QMessageBox.warning(
-                self, "Cartella esistente",
-                f"La cartella <b>{repo_name}</b> esiste già.<br>"
-                f"<code>{dest}</code>",
-            )
-            return
-        try:
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            QApplication.processEvents()
-            result = subprocess.run(
-                ["git", "clone", url, dest],
-                capture_output=True, text=True,
-            )
-            QApplication.restoreOverrideCursor()
-            if result.returncode != 0:
-                QMessageBox.critical(
-                    self, "Errore clone",
-                    f"git clone fallito:\n{result.stderr.strip()}",
-                )
-                return
-            QMessageBox.information(
-                self, "Clone completato",
-                f"<b>{repo_name}</b> clonato con successo.",
-            )
-            self.track_cloned.emit(dest)
-        except FileNotFoundError:
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(
-                self, "Errore",
-                "git non trovato. Installalo e riprova.",
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -2958,13 +2395,8 @@ class TrackManagerHub(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"Track Manager Hub v{_APP_VERSION}")
+        self.setWindowTitle("Track Manager Hub")
         self.resize(1280, 720)
-        screen = QApplication.primaryScreen()
-        if screen:
-            rect = screen.availableGeometry()
-            self.move(rect.x() + (rect.width() - 1280) // 2,
-                      rect.y() + (rect.height() - 720) // 2)
 
         # Discover tracks
         parent_dir = os.path.dirname(GENERATOR_DIR)
@@ -2981,14 +2413,14 @@ class TrackManagerHub(QMainWindow):
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(4, 4, 4, 4)
 
-        btn_dashboard = QPushButton("Dashboard")
-        btn_dashboard.setStyleSheet(
-            "QPushButton { background: #444; padding: 8px 12px; font-weight: bold; font-size: 10pt; }"
-            "QPushButton:hover { background: #555; }"
+        btn_new = QPushButton("+ Nuova Pista")
+        btn_new.setStyleSheet(
+            "QPushButton { background: #2a6e2a; padding: 8px 12px; font-weight: bold; font-size: 10pt; }"
+            "QPushButton:hover { background: #358535; }"
         )
-        btn_dashboard.setToolTip("Torna alla schermata principale")
-        btn_dashboard.clicked.connect(self._show_dashboard)
-        sidebar_layout.addWidget(btn_dashboard)
+        btn_new.setToolTip("Crea un nuovo progetto pista con struttura e file di configurazione")
+        btn_new.clicked.connect(self._create_new_track)
+        sidebar_layout.addWidget(btn_new)
 
         lbl = QLabel("TRACKS")
         lbl.setStyleSheet("font-weight: bold; font-size: 11pt; padding: 4px;")
@@ -3004,25 +2436,6 @@ class TrackManagerHub(QMainWindow):
         self.track_list.currentItemChanged.connect(self._on_track_selected)
         sidebar_layout.addWidget(self.track_list)
 
-        # Buttons below track list
-        btn_new = QPushButton("+ Nuova Pista")
-        btn_new.setStyleSheet(
-            "QPushButton { background: #2a6e2a; padding: 6px 10px; font-weight: bold; }"
-            "QPushButton:hover { background: #358535; }"
-        )
-        btn_new.setToolTip("Crea un nuovo progetto pista con struttura e file di configurazione")
-        btn_new.clicked.connect(self._create_new_track)
-        sidebar_layout.addWidget(btn_new)
-
-        btn_refresh = QPushButton("Ricarica lista")
-        btn_refresh.setStyleSheet(
-            "QPushButton { background: #3a3a3a; padding: 6px 10px; }"
-            "QPushButton:hover { background: #4a4a4a; }"
-        )
-        btn_refresh.setToolTip("Ricarica la lista delle piste trovate nella cartella parent")
-        btn_refresh.clicked.connect(self._refresh_tracks)
-        sidebar_layout.addWidget(btn_refresh)
-
         # Info box
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
@@ -3037,21 +2450,13 @@ class TrackManagerHub(QMainWindow):
 
         splitter.addWidget(sidebar)
 
-        # --- Right area: stacked (dashboard / tabs) ---
-        self.stack = QStackedWidget()
-
-        # Page 0: Dashboard
-        self.dashboard = DashboardPanel()
-        self.dashboard.track_cloned.connect(self._on_track_cloned)
-        self.stack.addWidget(self.dashboard)
-
-        # Page 1: Tabs
-        tabs_container = QWidget()
-        tabs_layout = QVBoxLayout(tabs_container)
-        tabs_layout.setContentsMargins(0, 0, 0, 0)
+        # --- Right area: tabs ---
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
 
         self.tabs = QTabWidget()
-        tabs_layout.addWidget(self.tabs)
+        right_layout.addWidget(self.tabs)
 
         # Tab 1: Parameters
         self.params_panel = ParametersPanel()
@@ -3070,8 +2475,7 @@ class TrackManagerHub(QMainWindow):
         self.preview_panel = PreviewPanel()
         self.tabs.addTab(self.preview_panel, "Preview")
 
-        self.stack.addWidget(tabs_container)
-        splitter.addWidget(self.stack)
+        splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
 
@@ -3088,9 +2492,12 @@ class TrackManagerHub(QMainWindow):
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
-        # Start on dashboard (no track selected)
+        # Default tab: Parametri
         self.tabs.setCurrentIndex(0)
-        self.stack.setCurrentIndex(0)
+
+        # Auto-select first track
+        if self._tracks:
+            self.track_list.setCurrentRow(0)
 
     def closeEvent(self, event):
         self.editor_panel.canvas._tile_fetcher.stop()
@@ -3106,28 +2513,10 @@ class TrackManagerHub(QMainWindow):
             self.track_list.addItem(item)
         self.track_list.blockSignals(False)
 
-    def _show_dashboard(self):
-        self.track_list.blockSignals(True)
-        self.track_list.setCurrentRow(-1)
-        self.track_list.blockSignals(False)
-        self.stack.setCurrentIndex(0)
-        self.info_box.setText("")
-        self.statusBar().showMessage("Pronto")
-
     def _refresh_tracks(self):
         parent_dir = os.path.dirname(GENERATOR_DIR)
         self._tracks = discover_tracks(parent_dir)
         self._populate_track_list()
-
-    def _on_track_cloned(self, cloned_path):
-        """Refresh track list and select the newly cloned track."""
-        self._refresh_tracks()
-        for i in range(self.track_list.count()):
-            item = self.track_list.item(i)
-            t = item.data(Qt.UserRole)
-            if t["path"] == cloned_path:
-                self.track_list.setCurrentRow(i)
-                return
 
     def _create_new_track(self):
         parent_dir = os.path.dirname(GENERATOR_DIR)
@@ -3159,15 +2548,15 @@ class TrackManagerHub(QMainWindow):
         config["slug"] = slug
         config["info"] = {"name": name}
         config["layouts"] = {"reverse": False}
-        with open(os.path.join(track_path, "track_config.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(track_path, "track_config.json"), "w") as f:
             json.dump(config, f, indent=2)
 
         # Create empty centerline.json v2
-        with open(os.path.join(track_path, "centerline.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(track_path, "centerline.json"), "w") as f:
             json.dump({"version": 2, "layers": [], "start": None, "map_center": None}, f, indent=2)
 
         # Create .gitignore
-        with open(os.path.join(track_path, ".gitignore"), "w", encoding="utf-8") as f:
+        with open(os.path.join(track_path, ".gitignore"), "w") as f:
             f.write(".venv/\nmod/\nbuilds/\n*.kn5\n*_reverse.blend\n")
 
         # Copy default cover.png from generator
@@ -3190,22 +2579,12 @@ class TrackManagerHub(QMainWindow):
             QApplication.processEvents()
             subprocess.run([pip, "install", "-r", req], check=True)
         except Exception as e:
-            if platform_utils.IS_WINDOWS:
-                venv_hint = (
-                    f"cd {track_path}\n"
-                    "python -m venv .venv\n"
-                    f".venv\\Scripts\\pip install -r "
-                    f"{os.path.join(GENERATOR_DIR, 'requirements.txt')}"
-                )
-            else:
-                venv_hint = (
-                    f"cd {track_path} && python3 -m venv .venv && "
-                    f".venv/bin/pip install -r "
-                    f"{os.path.join(GENERATOR_DIR, 'requirements.txt')}"
-                )
             QMessageBox.warning(self, "Attenzione",
                                 f"Errore nella creazione del venv:\n{e}\n\n"
-                                f"Puoi crearlo manualmente con:\n{venv_hint}")
+                                "Puoi crearlo manualmente con:\n"
+                                f"cd {track_path} && python3 -m venv .venv && "
+                                ".venv/bin/pip install -r "
+                                f"{os.path.join(GENERATOR_DIR, 'requirements.txt')}")
         self._loading_overlay.setText("Caricamento...")
         self._hide_loading()
 
@@ -3249,7 +2628,6 @@ class TrackManagerHub(QMainWindow):
     def _on_track_selected(self, current, _previous=None):
         if not current:
             return
-        self.stack.setCurrentIndex(1)
         self._show_loading()
 
         track = current.data(Qt.UserRole)
@@ -3282,7 +2660,7 @@ class TrackManagerHub(QMainWindow):
 
         # Update tabs
         self.params_panel.load_track(config_path)
-        self.editor_panel.load_track(track_root, config)
+        self.editor_panel.load_track(track_root)
 
         # Auto-set map from geotags or default to Naples
         if not self.editor_panel.canvas.get_map_center():
@@ -3297,8 +2675,6 @@ class TrackManagerHub(QMainWindow):
             self.editor_panel.coord_label.setText(f"{lat:.4f}, {lon:.4f}")
 
         self.preview_panel.load_track(track_root, config)
-        if self.tabs.currentWidget() is self.preview_panel:
-            self.preview_panel.ensure_loaded()
         self.build_panel.load_track(track_root, config)
 
         self._hide_loading()
